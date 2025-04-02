@@ -70,13 +70,12 @@ resource "random_id" "unique" {
 locals {
   name_prefix = "${var.aws_prefix}-${random_pet.name.id}-${random_id.unique.hex}"
   domain_name = "${local.name_prefix}.${var.aws_route53_fqdn}"
-  k8s_api_domain = "k8s-${local.name_prefix}.${var.aws_route53_fqdn}"
 }
 
 resource "aws_instance" "aws_instance" {
   count                  = 3
   ami                    = var.aws_ami
-  instance_type          = "t3a.medium"
+  instance_type          = "t3a.large"
   subnet_id              = var.aws_subnet_id
   vpc_security_group_ids = [var.aws_security_group_id]
   key_name               = var.aws_pem_key_name
