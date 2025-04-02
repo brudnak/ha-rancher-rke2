@@ -31,7 +31,26 @@ Perfect for testing Rancher HA setups or building real environments!
 
 ## 🧪 Usage
 
-### 1️⃣ Fill in your `tool-config.yml` (see below)
+### 1️⃣ Create a `tool-config.yml` file
+
+⚠️ Place it at the **project root**, right next to `README.md`.
+
+📁 Your directory structure should look like:
+
+```
+.
+├── README.md
+├── tool-config.yml  ✅
+├── go.mod
+├── terratest/
+│   └── test.go
+├── modules/
+│   └── aws/
+```
+
+➡️ See below for a complete sample `tool-config.yml`.
+
+---
 
 ### 2️⃣ Run the test to build your HA clusters:
 
@@ -39,7 +58,14 @@ Perfect for testing Rancher HA setups or building real environments!
 go test -v -timeout 60m
 ```
 
-### 3️⃣ Navigate to the HA folder created (e.g. `high-availability-1/`) and run:
+This will:
+- 🌍 Launch EC2s, ALBs, Route53 records via Terraform
+- 🧠 Auto-configure RKE2 across all nodes
+- ✍️ Create install scripts and kubeconfigs for each cluster
+
+---
+
+### 3️⃣ Navigate to a generated HA folder and run:
 
 ```bash
 ./install.sh
@@ -122,4 +148,3 @@ Pull requests welcome. Happy Ranching! 🧑‍🌾🌾
 ---
 
 _🌟 Built with Go, Terraform, and Rancher love._
-
