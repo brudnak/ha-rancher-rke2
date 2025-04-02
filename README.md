@@ -100,6 +100,10 @@ go test -v -run TestHACleanup -timeout 20m ./terratest
 
 ## 🧾 Sample `tool-config.yml`
 
+🔎 Where to find available rke2 k8s versions:
+
+[👨‍🌾🧙‍RKE2 v1.32.X Release Notes 👨‍🌾🧙‍♂️](https://docs.rke2.io/release-notes/v1.32.X)
+
 ```yaml
 aws:
   rsa_private_key: |
