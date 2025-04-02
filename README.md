@@ -1,46 +1,48 @@
-# 🚀 RKE2 Rancher HA Bootstrapper
+# 🐮✨ RKE2 Rancher HA Bootstrapper ✨🐮
 
-Welcome to the easiest way to spin up **Rancher High Availability (HA)** clusters on AWS using RKE2! 🐄  
-This repo automates everything from Terraform infra to Rancher install — just tweak the config and go! 🚀🌩️
+Welcome to the **easiest**, **chillest**, and most 🔥 way to spin up **Rancher High Availability (HA)** clusters on AWS using RKE2!  
+Just vibe, tweak a config, run a test, and you're Rancher-ready. 🌈⚡️🚀
+
+---
+
+## 💡 TL;DR – Why This Rocks
+
+✅ **No Cert Manager needed** — SSL is done via **AWS ACM** 🙌  
+✅ **Secure by default** — HTTPS from the jump 🔐  
+✅ **All you gotta do:**  
+1. 🛠️ Tweak the generated `install.sh` (if you even want to...)  
+2. 🚀 Run it — donezo.
+
+We install Rancher using:
+
+```bash
+--set tls=external
+```
+
+Because ACM certs are **already there**, TLS is **handled**. No drama. Just Rancher 🐮💕
 
 ---
 
 ## 🧠 What This Repo Does
 
-This tool helps you:
+This repo helps you:
 
-- 🌐 Provision a **3-node RKE2 HA cluster** per instance with Terraform  
-- 🔧 Auto-configure each node and load balancer  
-- 🐮 Generate a ready-to-run Rancher `install.sh` script  
-- 🎯 Simplify setup to a single test command  
-
-Perfect for testing Rancher HA setups or building real environments!
-
----
-
-## 🛠️ How It Works
-
-- Run the Go test suite 🧪  
-- Terraform provisions 3 EC2 nodes per HA set  
-- Nodes get configured with RKE2 and joined into a cluster  
-- ALB + DNS + TLS = ✔️  
-- Rancher install script is created and saved locally  
-- You run `install.sh` to install Rancher on your new cluster!
+- 🌍 Deploy **3-node RKE2 HA clusters** with Terraform
+- 🧠 Auto-configure each node & wire them up over a secure ALB
+- 🔒 Use AWS ACM for certs — no cert-manager required!
+- ✍️ Generate a custom `install.sh` script to install Rancher in 1 command
+- 🎯 All driven by a single test function, because... we love automation
 
 ---
 
-## 🧪 Usage
+## 📦 Directory Layout
 
-### 1️⃣ Create a `tool-config.yml` file
-
-⚠️ Place it at the **project root**, right next to `README.md`.
-
-📁 Your directory structure should look like:
+Put your `tool-config.yml` next to this README — right at the **project root**:
 
 ```
 .
 ├── README.md
-├── tool-config.yml  ✅
+├── tool-config.yml  🧙‍♂️ (put it here)
 ├── go.mod
 ├── terratest/
 │   └── test.go
@@ -48,30 +50,51 @@ Perfect for testing Rancher HA setups or building real environments!
 │   └── aws/
 ```
 
-➡️ See below for a complete sample `tool-config.yml`.
-
 ---
 
-### 2️⃣ Run the test to build your HA clusters:
+## 🧪 Spin It Up (HA Setup)
+
+Run this to build everything (with timeout so it doesn’t hang forever):
 
 ```bash
-go test -v -timeout 60m
+go test -v -run TestHaSetup -timeout 60m ./terratest
 ```
 
-This will:
-- 🌍 Launch EC2s, ALBs, Route53 records via Terraform
-- 🧠 Auto-configure RKE2 across all nodes
-- ✍️ Create install scripts and kubeconfigs for each cluster
+🎉 This will:
+
+- 🚀 Launch EC2s, ALBs, and Route53 DNS records
+- 🔐 Setup TLS with AWS ACM certs
+- 🧠 Bootstrap and join all 3 nodes into RKE2
+- 📝 Drop a ready-to-run Rancher `install.sh` in each HA folder
 
 ---
 
-### 3️⃣ Navigate to a generated HA folder and run:
+## 🐮 Install Rancher
+
+Navigate to your HA cluster directory (like `high-availability-1/`) and run:
 
 ```bash
 ./install.sh
 ```
 
-Boom 💥 — Rancher is up and running! 🐄
+This installs Rancher securely via ALB + ACM certs with TLS 🔒  
+No cert-manager needed. No cluster pain. Just good vibes and cattle ✨🐄
+
+---
+
+## 💣 Tear It Down (Cleanup)
+
+When you're done, run cleanup:
+
+```bash
+go test -v -run TestHACleanup -timeout 20m ./terratest
+```
+
+💥 This will:
+
+- 💨 Destroy all infra via Terraform
+- 🧹 Clean up generated files and folders
+- 🧼 Leave your AWS nice and tidy
 
 ---
 
@@ -112,38 +135,27 @@ tf_vars:
 
 ## 📁 Output Example
 
-For each HA cluster, a folder like this is created:
+Each HA setup creates a folder like:
 
 ```
 high-availability-1/
-├── install.sh           # Rancher install script
-├── kube_config.yaml     # RKE2 kubeconfig
+├── install.sh         🐚 One-command Rancher installer
+├── kube_config.yaml   📄 Your RKE2 kubeconfig
 ```
 
-Use these to install Rancher and access your cluster!
+You're basically a Rancher wizard now 🧙‍♀️✨
 
 ---
 
-## 🧼 Cleanup
+## 🧡 Final Notes
 
-When you're done, clean up all resources with:
-
-```bash
-go test -run TestHACleanup
-```
-
-This will:
-- 💣 Destroy the infra
-- 🧹 Clean up temp files and directories
+This tool was built to make Rancher HA setup fun, secure, and dead simple.  
+With Terraform, RKE2, and ACM doing the heavy lifting — you just ride the Rancher wave 🌊🐄
 
 ---
 
-## 💬 Final Notes
-
-This tool was made to make Rancher HA fun and painless.  
-Tweak the install script, adjust the Terraform as needed, and deploy away! 🐮🌎
-
-Pull requests welcome. Happy Ranching! 🧑‍🌾🌾
+**Pull requests welcome. Questions welcome. Rancher users always welcome.**  
+Happy HA'ing! 🌟🐮💫
 
 ---
 
