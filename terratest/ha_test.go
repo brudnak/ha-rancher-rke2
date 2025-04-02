@@ -9,13 +9,13 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/brudnak/ha-rancher-rke2/terratest/hcl"
 
 	"github.com/gruntwork-io/terratest/modules/terraform"
-	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/spf13/viper"
@@ -48,9 +48,125 @@ func TestHaSetup(t *testing.T) {
 		t.Fatal("No outputs received from terraform")
 	}
 
+	// Process all HA instances in parallel
+	var wg sync.WaitGroup
+	var setupErr error
+	var setupErrMutex sync.Mutex
+
 	for i := 1; i <= totalHAs; i++ {
-		processHAInstance(t, i, outputs)
+		wg.Add(1)
+		instanceNum := i
+
+		go func(instanceNum int) {
+			defer wg.Done()
+
+			log.Printf("Starting setup for HA instance %d", instanceNum)
+
+			// Create a subtest instead of a custom wrapper
+			t.Run(fmt.Sprintf("HA%d", instanceNum), func(subT *testing.T) {
+				// We'll use a helper function that captures failures
+				if err := setupHAInstance(subT, instanceNum, outputs); err != nil {
+					setupErrMutex.Lock()
+					setupErr = fmt.Errorf("HA instance %d setup failed: %s", instanceNum, err.Error())
+					setupErrMutex.Unlock()
+					subT.Fail() // Mark the subtest as failed but continue execution
+				}
+			})
+		}(instanceNum)
 	}
+
+	// Wait for all HA instances to complete setup
+	wg.Wait()
+
+	// Check if any errors occurred
+	if setupErr != nil {
+		t.Fatalf("Error during parallel HA setup: %v", setupErr)
+	}
+}
+
+// setupHAInstance is a helper that returns errors instead of failing immediately
+func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) error {
+	haDir := fmt.Sprintf("high-availability-%d", instanceNum)
+
+	haOutputs := getHAOutputs(instanceNum, outputs)
+
+	// Validate IPs - return error instead of failing
+	ips := []string{
+		haOutputs.Server1IP, haOutputs.Server2IP, haOutputs.Server3IP,
+		haOutputs.Server1PrivateIP, haOutputs.Server2PrivateIP, haOutputs.Server3PrivateIP,
+	}
+	for _, ip := range ips {
+		if CheckIPAddress(ip) != "valid" {
+			return fmt.Errorf("invalid IP address: %s", ip)
+		}
+	}
+
+	CreateDir(haDir)
+
+	// Create Rancher installation script
+	bootstrapPassword := viper.GetString("rancher.bootstrap_password")
+	image := viper.GetString("rancher.image_tag")
+	chart := viper.GetString("rancher.version")
+	CreateInstallScript(haOutputs.RancherURL, bootstrapPassword, image, chart, haDir)
+
+	// Setup first server node
+	log.Printf("Setting up first server node with IP %s", haOutputs.Server1IP)
+	err := setupFirstServerNode(haOutputs.Server1IP, haOutputs)
+	if err != nil {
+		return fmt.Errorf("failed to setup first server node: %w", err)
+	}
+
+	// Get token from first node
+	token, err := getNodeToken(haOutputs.Server1IP)
+	if err != nil {
+		return fmt.Errorf("failed to get node token: %w", err)
+	}
+
+	// Setup additional server nodes in parallel
+	var wg sync.WaitGroup
+	var setupErr error
+	var setupErrMutex sync.Mutex
+
+	for i, ip := range []string{haOutputs.Server2IP, haOutputs.Server3IP} {
+		wg.Add(1)
+		nodeNum := i + 2 // Node 2 or 3
+
+		go func(ip string, nodeNum int) {
+			defer wg.Done()
+
+			log.Printf("Setting up server node %d with IP %s", nodeNum, ip)
+			err := setupAdditionalServerNode(ip, token, haOutputs)
+			if err != nil {
+				setupErrMutex.Lock()
+				setupErr = fmt.Errorf("failed to setup server node %d: %w", nodeNum, err)
+				setupErrMutex.Unlock()
+			}
+		}(ip, nodeNum)
+	}
+
+	// Wait for all additional nodes to be set up
+	wg.Wait()
+
+	// Check if we got any errors during parallel setup
+	if setupErr != nil {
+		return fmt.Errorf("node setup error: %w", setupErr)
+	}
+
+	// Wait for cluster to fully initialize (all nodes ready)
+	log.Printf("Waiting for cluster to fully initialize...")
+	time.Sleep(30 * time.Second)
+
+	// Get and save the kubeconfig with direct server IP
+	err = getAndSaveKubeconfig(haOutputs.Server1IP, haDir)
+	if err != nil {
+		t.Logf("Warning: Failed to save kubeconfig: %v", err)
+	}
+
+	log.Printf("HA %d setup complete", instanceNum)
+	log.Printf("HA %d LB: %s", instanceNum, haOutputs.LoadBalancerDNS)
+	log.Printf("HA %d Rancher URL: %s", instanceNum, haOutputs.RancherURL)
+
+	return nil
 }
 
 func TestHACleanup(t *testing.T) {
@@ -188,61 +304,6 @@ func RunCommand(cmd string, pubIP string) (string, error) {
 	stringOut = strings.TrimRight(stringOut, "\r\n")
 
 	return stringOut, nil
-}
-
-func processHAInstance(t *testing.T, instanceNum int, outputs map[string]string) {
-	haDir := fmt.Sprintf("high-availability-%d", instanceNum)
-
-	haOutputs := getHAOutputs(instanceNum, outputs)
-	validateIPs(t, haOutputs)
-
-	CreateDir(haDir)
-
-	// Create Rancher installation script
-	bootstrapPassword := viper.GetString("rancher.bootstrap_password")
-	image := viper.GetString("rancher.image_tag")
-	chart := viper.GetString("rancher.version")
-	CreateInstallScript(haOutputs.RancherURL, bootstrapPassword, image, chart, haDir)
-
-	// Setup first server node
-	log.Printf("Setting up first server node with IP %s", haOutputs.Server1IP)
-	err := setupFirstServerNode(haOutputs.Server1IP, haOutputs)
-	if err != nil {
-		t.Fatalf("Failed to setup first server node: %v", err)
-	}
-
-	// Get token from first node
-	token, err := getNodeToken(haOutputs.Server1IP)
-	if err != nil {
-		t.Fatalf("Failed to get node token: %v", err)
-	}
-
-	// Setup additional server nodes
-	log.Printf("Setting up second server node with IP %s", haOutputs.Server2IP)
-	err = setupAdditionalServerNode(haOutputs.Server2IP, token, haOutputs)
-	if err != nil {
-		t.Fatalf("Failed to setup second server node: %v", err)
-	}
-
-	log.Printf("Setting up third server node with IP %s", haOutputs.Server3IP)
-	err = setupAdditionalServerNode(haOutputs.Server3IP, token, haOutputs)
-	if err != nil {
-		t.Fatalf("Failed to setup third server node: %v", err)
-	}
-
-	// Wait for cluster to fully initialize (all nodes ready)
-	log.Printf("Waiting for cluster to fully initialize...")
-	time.Sleep(30 * time.Second)
-
-	// Get and save the kubeconfig with direct server IP
-	err = getAndSaveKubeconfig(haOutputs.Server1IP, haDir)
-	if err != nil {
-		t.Logf("Warning: Failed to save kubeconfig: %v", err)
-	}
-
-	log.Printf("HA %d setup complete", instanceNum)
-	log.Printf("HA %d LB: %s", instanceNum, haOutputs.LoadBalancerDNS)
-	log.Printf("HA %d Rancher URL: %s", instanceNum, haOutputs.RancherURL)
 }
 
 func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
@@ -423,17 +484,6 @@ func getAndSaveKubeconfig(serverIP string, haDir string) error {
 
 	log.Printf("Kubeconfig saved to %s", kubeConfigPath)
 	return nil
-}
-
-func validateIPs(t *testing.T, outputs TerraformOutputs) {
-	ips := []string{
-		outputs.Server1IP, outputs.Server2IP, outputs.Server3IP,
-		outputs.Server1PrivateIP, outputs.Server2PrivateIP, outputs.Server3PrivateIP,
-	}
-
-	for _, ip := range ips {
-		assert.Equal(t, "valid", CheckIPAddress(ip), fmt.Sprintf("Invalid IP address: %s", ip))
-	}
 }
 
 func cleanupHAInstance(instanceNum int) {
