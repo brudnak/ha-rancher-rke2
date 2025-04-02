@@ -12,7 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/brudnak/aws-ha-infra/terratest/hcl"
+	"github.com/brudnak/ha-rancher-rke2/terratest/hcl"
+
 	"github.com/gruntwork-io/terratest/modules/terraform"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/ssh"
