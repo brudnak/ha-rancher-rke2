@@ -80,13 +80,20 @@ resource "aws_instance" "aws_instance" {
   vpc_security_group_ids = [var.aws_security_group_id]
   key_name               = var.aws_pem_key_name
 
-  root_block_device {
-    volume_size = 150
-  }
+    root_block_device {
+      volume_size = 200
+      tags = {
+        Name = "${local.name_prefix}-${count.index + 1}"
+        DoNotDelete = "True"
+        Owner = "${var.aws_prefix}-terraform"
+      }
+    }
 
-  tags = {
-    Name = "${local.name_prefix}-${count.index + 1}"
-  }
+    tags = {
+      Name = "${local.name_prefix}-${count.index + 1}"
+      DoNotDelete = "True"
+      Owner = "${var.aws_prefix}-terraform"
+    }
 }
 
 # Application Load Balancer for Rancher UI (80/443)
