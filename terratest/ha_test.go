@@ -103,7 +103,7 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 
 	CreateDir(haDir)
 
-	// Create Rancher installation script
+	// Create a Rancher installation script
 	bootstrapPassword := viper.GetString("rancher.bootstrap_password")
 	image := viper.GetString("rancher.image_tag")
 	chart := viper.GetString("rancher.version")
@@ -116,7 +116,6 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 		return fmt.Errorf("failed to setup first server node: %w", err)
 	}
 
-	// Get token from first node
 	token, err := getNodeToken(haOutputs.Server1IP)
 	if err != nil {
 		return fmt.Errorf("failed to get node token: %w", err)
@@ -152,7 +151,6 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 		return fmt.Errorf("node setup error: %w", setupErr)
 	}
 
-	// Wait for cluster to fully initialize (all nodes ready)
 	log.Printf("Waiting for cluster to fully initialize...")
 	time.Sleep(30 * time.Second)
 
@@ -314,7 +312,6 @@ func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// Create config file with TLS SAN entries for all nodes and load balancer
 	configContent := fmt.Sprintf(`tls-san:
   - %s
   - %s
@@ -353,7 +350,6 @@ func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
 		return fmt.Errorf("failed to enable RKE2 server: %w", err)
 	}
 
-	// Start RKE2 server in the background
 	cmd = "sudo systemctl start rke2-server.service &"
 	_, err = RunCommand(cmd, ip)
 	if err != nil {
@@ -396,7 +392,6 @@ func setupAdditionalServerNode(ip, token string, haOutputs TerraformOutputs) err
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// Create config file with server URL, token, and TLS SAN entries for all nodes and load balancer
 	configContent := fmt.Sprintf(`server: https://%s:9345
 token: %s
 tls-san:
@@ -438,7 +433,6 @@ tls-san:
 		return fmt.Errorf("failed to enable RKE2 server: %w", err)
 	}
 
-	// Start RKE2 server in the background
 	cmd = "sudo systemctl start rke2-server.service &"
 	_, err = RunCommand(cmd, ip)
 	if err != nil {
