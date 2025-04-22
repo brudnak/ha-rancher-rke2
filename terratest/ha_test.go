@@ -8,6 +8,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -38,6 +40,13 @@ func TestHaSetup(t *testing.T) {
 	totalHAs := viper.GetInt("total_has")
 	if totalHAs < 1 {
 		t.Fatal("total_has must be at least 1")
+	}
+
+	// Validate that the number of Helm commands matches the number of HA instances
+	helmCommands := viper.GetStringSlice("rancher.helm_commands")
+	if len(helmCommands) != totalHAs {
+		t.Fatalf("Number of Helm commands (%d) does not match the number of HA instances (%d). Please ensure you have exactly %d Helm commands in your configuration.", 
+			len(helmCommands), totalHAs, totalHAs)
 	}
 
 	terraformOptions := getTerraformOptions(t, totalHAs)
@@ -101,17 +110,47 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 		}
 	}
 
-	CreateDir(haDir)
+	// Get the absolute path to the current directory
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
 
-	// Create a Rancher installation script
-	bootstrapPassword := viper.GetString("rancher.bootstrap_password")
-	image := viper.GetString("rancher.image_tag")
-	chart := viper.GetString("rancher.version")
-	CreateInstallScript(haOutputs.RancherURL, bootstrapPassword, image, chart, haDir)
+	// Make sure the HA directory exists using absolute path
+	absHADir := filepath.Join(currentDir, haDir)
+	if _, err := os.Stat(absHADir); os.IsNotExist(err) {
+		// Try to create the directory if it doesn't exist
+		if mkdirErr := os.MkdirAll(absHADir, os.ModePerm); mkdirErr != nil {
+			return fmt.Errorf("failed to create directory %s: %w", absHADir, mkdirErr)
+		}
+		log.Printf("Created directory %s", absHADir)
+	}
+
+	// Get the Helm command for this instance (index is 0-based, instanceNum is 1-based)
+	helmCommands := viper.GetStringSlice("rancher.helm_commands")
+	helmCommand := helmCommands[instanceNum-1]
+
+	// Inject the RancherURL into the Helm command by replacing the hostname
+	// This assumes the hostname is specified with --set hostname=something
+	if strings.Contains(helmCommand, "--set hostname=") {
+		// Replace the hostname with the RancherURL from Terraform outputs
+		helmCommand = strings.Replace(
+			helmCommand, 
+			"--set hostname="+strings.Split(strings.Split(helmCommand, "--set hostname=")[1], " ")[0],
+			"--set hostname="+haOutputs.RancherURL,
+			1,
+		)
+	} else {
+		// If no hostname is set, add it
+		helmCommand = strings.TrimSpace(helmCommand) + fmt.Sprintf(" \\\n  --set hostname=%s", haOutputs.RancherURL)
+	}
+
+	// Create a Rancher installation script with the user-provided Helm command
+	CreateInstallScript(helmCommand, haDir)
 
 	// Setup first server node
 	log.Printf("Setting up first server node with IP %s", haOutputs.Server1IP)
-	err := setupFirstServerNode(haOutputs.Server1IP, haOutputs)
+	err = setupFirstServerNode(haOutputs.Server1IP, haOutputs)
 	if err != nil {
 		return fmt.Errorf("failed to setup first server node: %w", err)
 	}
@@ -159,6 +198,43 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 	if err != nil {
 		t.Logf("Warning: Failed to save kubeconfig: %v", err)
 	}
+
+	// Execute the install script now that the kubeconfig is available
+	installScriptPath := fmt.Sprintf("%s/install.sh", haDir)
+	log.Printf("Executing install script at %s", installScriptPath)
+
+	// Get the absolute path to the current directory and the HA directory
+	currentDir, dirErr := os.Getwd()
+	if dirErr != nil {
+		return fmt.Errorf("failed to get current directory: %w", dirErr)
+	}
+
+	// Make sure the HA directory exists
+	absHADirForScript := filepath.Join(currentDir, haDir)
+	if _, err := os.Stat(absHADirForScript); os.IsNotExist(err) {
+		// Try to create the directory if it doesn't exist
+		if mkdirErr := os.MkdirAll(absHADirForScript, os.ModePerm); mkdirErr != nil {
+			return fmt.Errorf("failed to create directory %s: %w", absHADirForScript, mkdirErr)
+		}
+		log.Printf("Created directory %s", absHADirForScript)
+	}
+
+	// Use absolute paths for everything
+	absInstallScriptPath := filepath.Join(absHADirForScript, "install.sh")
+	absKubeConfigPath := filepath.Join(absHADirForScript, "kube_config.yaml")
+
+	// Set up the command with the correct environment and working directory
+	cmd := exec.Command(absInstallScriptPath)
+	cmd.Dir = absHADirForScript
+	cmd.Env = append(os.Environ(), fmt.Sprintf("KUBECONFIG=%s", absKubeConfigPath))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if execErr := cmd.Run(); execErr != nil {
+		return fmt.Errorf("failed to execute install script: %w", execErr)
+	}
+
+	log.Printf("Install script executed successfully")
 
 	log.Printf("HA %d setup complete", instanceNum)
 	log.Printf("HA %d LB: %s", instanceNum, haOutputs.LoadBalancerDNS)
@@ -469,14 +545,30 @@ func getAndSaveKubeconfig(serverIP string, haDir string) error {
 	configIP := fmt.Sprintf("https://%s:6443", serverIP)
 	modifiedKubeconfig := strings.Replace(rawKubeconfig, "https://127.0.0.1:6443", configIP, -1)
 
-	// Write the modified kubeconfig to the high-availability folder
-	kubeConfigPath := fmt.Sprintf("%s/kube_config.yaml", haDir)
-	err = os.WriteFile(kubeConfigPath, []byte(modifiedKubeconfig), 0644)
+	// Get the absolute path to the current directory
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Make sure the HA directory exists
+	absHADir := filepath.Join(currentDir, haDir)
+	if _, err := os.Stat(absHADir); os.IsNotExist(err) {
+		// Try to create the directory if it doesn't exist
+		if mkdirErr := os.MkdirAll(absHADir, os.ModePerm); mkdirErr != nil {
+			return fmt.Errorf("failed to create directory %s: %w", absHADir, mkdirErr)
+		}
+		log.Printf("Created directory %s", absHADir)
+	}
+
+	// Write the modified kubeconfig to the high-availability folder using absolute path
+	absKubeConfigPath := filepath.Join(absHADir, "kube_config.yaml")
+	err = os.WriteFile(absKubeConfigPath, []byte(modifiedKubeconfig), 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write kubeconfig file: %w", err)
 	}
 
-	log.Printf("Kubeconfig saved to %s", kubeConfigPath)
+	log.Printf("Kubeconfig saved to %s", absKubeConfigPath)
 	return nil
 }
 
@@ -511,7 +603,7 @@ func cleanupTerraformFiles() {
 	RemoveFolder("../modules/aws/.terraform")
 }
 
-func CreateInstallScript(rancherURL, bsPassword, image, chart, haDir string) {
+func CreateInstallScript(helmCommand, haDir string) {
 	installScript := fmt.Sprintf(`#!/bin/bash
 # First make sure we're using the right kubeconfig
 if [ ! -f "kube_config.yaml" ]; then
@@ -536,23 +628,36 @@ echo "Creating namespace..."
 kubectl create namespace cattle-system
 
 echo "Installing Rancher..."
-helm install rancher rancher-latest/rancher \
-  --namespace cattle-system \
-  --set hostname=%s \
-  --set bootstrapPassword=%s \
-  --set tls=external \
-  --set global.cattle.psp.enabled=false \
-  --set rancherImageTag=%s \
-  --version %s \
-  --set agentTLSMode=system-store
+%s
 
-echo "Rancher installation complete!"`, rancherURL, bsPassword, image, chart)
+echo "Rancher installation complete!"`, helmCommand)
 
-	writeFile(fmt.Sprintf("%s/install.sh", haDir), []byte(installScript))
+	// Get the absolute path to the current directory
+	currentDir, err := os.Getwd()
+	if err != nil {
+		log.Printf("Failed to get current directory: %v", err)
+		return
+	}
+
+	// Make sure the HA directory exists
+	absHADir := filepath.Join(currentDir, haDir)
+	if _, err := os.Stat(absHADir); os.IsNotExist(err) {
+		// Try to create the directory if it doesn't exist
+		if mkdirErr := os.MkdirAll(absHADir, os.ModePerm); mkdirErr != nil {
+			log.Printf("Failed to create directory %s: %v", absHADir, mkdirErr)
+			return
+		}
+		log.Printf("Created directory %s", absHADir)
+	}
+
+	// Use absolute path for the install script
+	absInstallScriptPath := filepath.Join(absHADir, "install.sh")
+	writeFile(absInstallScriptPath, []byte(installScript))
 
 	// Make the script executable
-	err := os.Chmod(fmt.Sprintf("%s/install.sh", haDir), 0755)
+	err = os.Chmod(absInstallScriptPath, 0755)
 	if err != nil {
+		log.Printf("Failed to make script executable: %v", err)
 		return
 	}
 }

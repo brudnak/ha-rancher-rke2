@@ -9,9 +9,10 @@ Just vibe, tweak a config, run a test, and you're Rancher-ready. 🌈⚡️🚀
 
 ✅ **No Cert Manager needed** — SSL is done via **AWS ACM** 🙌  
 ✅ **Secure by default** — HTTPS from the jump 🔐  
+✅ **Fully automated** — Rancher installation happens automatically 🤖  
 ✅ **All you gotta do:**  
-1. 🛠️ Tweak the generated `install.sh` (if you even want to...)  
-2. 🚀 Run it — donezo.
+1. 🛠️ Configure your Helm commands in `tool-config.yml`  
+2. 🚀 Run the test — donezo!
 
 We install Rancher using:
 
@@ -30,7 +31,8 @@ This repo helps you:
 - 🌍 Deploy **3-node RKE2 HA clusters** with Terraform
 - 🧠 Auto-configure each node & wire them up over a secure ALB
 - 🔒 Use AWS ACM for certs — no cert-manager required!
-- ✍️ Generate a custom `install.sh` script to install Rancher in 1 command
+- ✍️ Generate and execute a custom `install.sh` script to install Rancher in 1 command
+- 🔄 Automatically inject the correct URL into each Helm command
 - 🎯 All driven by a single test function, because... we love automation
 
 ---
@@ -65,20 +67,23 @@ go test -v -run TestHaSetup -timeout 60m ./terratest
 - 🚀 Launch EC2s, ALBs, and Route53 DNS records
 - 🔐 Setup TLS with AWS ACM certs
 - 🧠 Bootstrap and join all 3 nodes into RKE2
-- 📝 Drop a ready-to-run Rancher `install.sh` in each HA folder
+- 📝 Generate and execute a Rancher `install.sh` script in each HA folder
+- 🔄 Automatically inject the correct URL into each Helm command
 
 ---
 
-## 🐮 Install Rancher
+## 🐮 Rancher Installation (Automatic)
 
-Navigate to your HA cluster directory (like `high-availability-1/`) and run:
+Rancher is now installed automatically during the setup process! The tool:
 
-```bash
-./install.sh
-```
+1. 🔄 Injects the correct URL into each Helm command
+2. 📝 Generates the install script for each HA instance
+3. 🚀 Executes the script to install Rancher
 
 This installs Rancher securely via ALB + ACM certs with TLS 🔒  
 No cert-manager needed. No cluster pain. Just good vibes and cattle ✨🐄
+
+> 💡 **Note:** The install scripts are still available in each `high-availability-X/` directory if you need to run them again or modify them.
 
 ---
 
@@ -104,6 +109,16 @@ go test -v -run TestHACleanup -timeout 20m ./terratest
 
 [👨‍🌾🧙‍RKE2 v1.32.X Release Notes 👨‍🌾🧙‍♂️](https://docs.rke2.io/release-notes/v1.32.X)
 
+### 🚨 Important Configuration Notes
+
+- The number of Helm commands under `rancher.helm_commands` **must match** the `total_has` value
+- Each Helm command will be used for a specific HA instance (first command for first instance, etc.)
+- You can customize each Helm command with different parameters (bootstrap password, version, etc.)
+- The `hostname` parameter in each Helm command will be automatically replaced with the correct URL
+  - You can leave it blank, use a placeholder, or include your own value (it will be overridden)
+- The tool will validate that the number of commands matches `total_has` and fail with an error if they don't match
+- The install script is automatically executed for each HA instance during setup
+
 ```yaml
 aws:
   rsa_private_key: |
@@ -111,14 +126,32 @@ aws:
     -----END RSA PRIVATE KEY-----
 
 rancher:
-  bootstrap_password: ""
-  image_tag: "v2.11.0"
-  version: "2.11.0"
-
+  helm_commands:
+    - |
+      helm install rancher rancher-latest/rancher \
+        --namespace cattle-system \
+        --set hostname=placeholder \
+        --set bootstrapPassword=your-password \
+        --set tls=external \
+        --set global.cattle.psp.enabled=false \
+        --set rancherImageTag=v2.11.0 \
+        --version 2.11.0 \
+        --set agentTLSMode=system-store
+    - |
+      helm install rancher rancher-latest/rancher \
+        --namespace cattle-system \
+        --set hostname=placeholder \
+        --set bootstrapPassword=your-password \
+        --set tls=external \
+        --set global.cattle.psp.enabled=false \
+        --set rancherImageTag=v2.11.0 \
+        --version 2.11.0 \
+        --set agentTLSMode=system-store
+      
 k8s:
   version: "v1.31.4+rke2r1"
 
-total_has: 2  # Number of HA clusters to create
+total_has: 2  # Number of HA clusters to create (must match number of helm_commands)
 
 tf_vars:
   aws_access_key: "super-secret-key"
