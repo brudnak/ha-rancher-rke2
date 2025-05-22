@@ -1,50 +1,37 @@
-# 🐮✨ RKE2 Rancher HA Bootstrapper ✨🐮
+# RKE2 Rancher HA Bootstrapper
 
-Welcome to the **easiest**, **chillest**, and most 🔥 way to spin up **Rancher High Availability (HA)** clusters on AWS using RKE2!  
-Just vibe, tweak a config, run a test, and you're Rancher-ready. 🌈⚡️🚀
+Deploy Rancher High Availability (HA) clusters on AWS using RKE2 with automated setup and secure configuration.
 
----
+## Key Features
 
-## 💡 TL;DR – Why This Rocks
+- **No Cert Manager required** — SSL is handled via AWS ACM
+- **Secure by default** — HTTPS enabled from deployment
+- **Fully automated** — Rancher installation happens automatically
+- **Simple workflow:**
+  1. Configure your Helm commands in `tool-config.yml`
+  2. Run the test command
 
-✅ **No Cert Manager needed** — SSL is done via **AWS ACM** 🙌  
-✅ **Secure by default** — HTTPS from the jump 🔐  
-✅ **Fully automated** — Rancher installation happens automatically 🤖  
-✅ **All you gotta do:**  
-1. 🛠️ Configure your Helm commands in `tool-config.yml`  
-2. 🚀 Run the test — donezo!
+Rancher is installed with `--set tls=external` since ACM certificates handle TLS termination.
 
-We install Rancher using:
+## Overview
 
-```bash
---set tls=external
-```
+This repository provides:
 
-Because ACM certs are **already there**, TLS is **handled**. No drama. Just Rancher 🐮💕
+- Deploy 3-node RKE2 HA clusters with Terraform
+- Auto-configure each node with secure ALB integration
+- Use AWS ACM for certificates (no cert-manager required)
+- Generate and execute custom installation scripts
+- Automatically inject correct URLs into Helm commands
+- Single test command deployment
 
----
+## Directory Structure
 
-## 🧠 What This Repo Does
-
-This repo helps you:
-
-- 🌍 Deploy **3-node RKE2 HA clusters** with Terraform
-- 🧠 Auto-configure each node & wire them up over a secure ALB
-- 🔒 Use AWS ACM for certs — no cert-manager required!
-- ✍️ Generate and execute a custom `install.sh` script to install Rancher in 1 command
-- 🔄 Automatically inject the correct URL into each Helm command
-- 🎯 All driven by a single test function, because... we love automation
-
----
-
-## 📦 Directory Layout
-
-Put your `tool-config.yml` next to this README — right at the **project root**:
+Place `tool-config.yml` at the project root:
 
 ```
 .
 ├── README.md
-├── tool-config.yml  🧙‍♂️ (put it here)
+├── tool-config.yml
 ├── go.mod
 ├── terratest/
 │   └── test.go
@@ -52,64 +39,55 @@ Put your `tool-config.yml` next to this README — right at the **project root**
 │   └── aws/
 ```
 
----
+## Deployment
 
-## 🧪 Spin It Up (HA Setup)
-
-Run this to build everything (with timeout so it doesn’t hang forever):
+Run the following command to deploy the infrastructure:
 
 ```bash
 go test -v -run TestHaSetup -timeout 60m ./terratest
 ```
 
-🎉 This will:
+This command will:
 
-- 🚀 Launch EC2s, ALBs, and Route53 DNS records
-- 🔐 Setup TLS with AWS ACM certs
-- 🧠 Bootstrap and join all 3 nodes into RKE2
-- 📝 Generate and execute a Rancher `install.sh` script in each HA folder
-- 🔄 Automatically inject the correct URL into each Helm command
+- Launch EC2 instances, ALBs, and Route53 DNS records
+- Configure TLS with AWS ACM certificates
+- Bootstrap and join all 3 nodes into RKE2 cluster
+- Generate and execute Rancher installation scripts
+- Automatically inject correct URLs into Helm commands
 
----
+## Rancher Installation
 
-## 🐮 Rancher Installation (Automatic)
+Rancher is installed automatically during the setup process:
 
-Rancher is now installed automatically during the setup process! The tool:
+1. Correct URLs are injected into each Helm command
+2. Install scripts are generated for each HA instance
+3. Scripts are executed to install Rancher
 
-1. 🔄 Injects the correct URL into each Helm command
-2. 📝 Generates the install script for each HA instance
-3. 🚀 Executes the script to install Rancher
+Installation uses ALB with ACM certificates for secure HTTPS access without requiring cert-manager.
 
-This installs Rancher securely via ALB + ACM certs with TLS 🔒  
-No cert-manager needed. No cluster pain. Just good vibes and cattle ✨🐄
+**Note:** Install scripts remain available in each `high-availability-X/` directory for manual re-execution if needed.
 
-> 💡 **Note:** The install scripts are still available in each `high-availability-X/` directory if you need to run them again or modify them.
+## Cleanup
 
----
-
-## 💣 Tear It Down (Cleanup)
-
-When you're done, run cleanup:
+To destroy all resources:
 
 ```bash
 go test -v -run TestHACleanup -timeout 20m ./terratest
 ```
 
-💥 This will:
+This will:
 
-- 💨 Destroy all infra via Terraform
-- 🧹 Clean up generated files and folders
-- 🧼 Leave your AWS nice and tidy
+- Destroy all infrastructure via Terraform
+- Clean up generated files and folders
+- Remove all AWS resources
 
----
+## Configuration
 
-## 🧾 Sample `tool-config.yml`
+### Sample `tool-config.yml`
 
-🔎 Where to find available rke2 k8s versions:
+For available RKE2 Kubernetes versions, refer to: [RKE2 v1.32.X Release Notes](https://docs.rke2.io/release-notes/v1.32.X)
 
-[👨‍🌾🧙‍RKE2 v1.32.X Release Notes 👨‍🌾🧙‍♂️](https://docs.rke2.io/release-notes/v1.32.X)
-
-### 🚨 Important Configuration Notes
+### Important Configuration Notes
 
 - The number of Helm commands under `rancher.helm_commands` **must match** the `total_has` value
 - Each Helm command will be used for a specific HA instance (first command for first instance, etc.)
@@ -168,32 +146,20 @@ tf_vars:
   aws_route53_fqdn: ""
 ```
 
----
-
-## 📁 Output Example
+## Output Example
 
 Each HA setup creates a folder like:
 
 ```
 high-availability-1/
-├── install.sh         🐚 One-command Rancher installer
-├── kube_config.yaml   📄 Your RKE2 kubeconfig
+├── install.sh         # Rancher installation script
+├── kube_config.yaml   # RKE2 kubeconfig
 ```
 
-You're basically a Rancher wizard now 🧙‍♀️✨
+## Contributing
+
+Pull requests and questions are welcome.
 
 ---
 
-## 🧡 Final Notes
-
-This tool was built to make Rancher HA setup fun, secure, and dead simple.  
-With Terraform, RKE2, and ACM doing the heavy lifting — you just ride the Rancher wave 🌊🐄
-
----
-
-**Pull requests welcome. Questions welcome. Rancher users always welcome.**  
-Happy HA'ing! 🌟🐮💫
-
----
-
-_🌟 Built with Go, Terraform, and Rancher love._
+_Built with Go, Terraform, and Rancher._
