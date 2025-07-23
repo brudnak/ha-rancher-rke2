@@ -45,7 +45,7 @@ func TestHaSetup(t *testing.T) {
 	// Validate that the number of Helm commands matches the number of HA instances
 	helmCommands := viper.GetStringSlice("rancher.helm_commands")
 	if len(helmCommands) != totalHAs {
-		t.Fatalf("Number of Helm commands (%d) does not match the number of HA instances (%d). Please ensure you have exactly %d Helm commands in your configuration.", 
+		t.Fatalf("Number of Helm commands (%d) does not match the number of HA instances (%d). Please ensure you have exactly %d Helm commands in your configuration.",
 			len(helmCommands), totalHAs, totalHAs)
 	}
 
@@ -135,7 +135,7 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 	if strings.Contains(helmCommand, "--set hostname=") {
 		// Replace the hostname with the RancherURL from Terraform outputs
 		helmCommand = strings.Replace(
-			helmCommand, 
+			helmCommand,
 			"--set hostname="+strings.Split(strings.Split(helmCommand, "--set hostname=")[1], " ")[0],
 			"--set hostname="+haOutputs.RancherURL,
 			1,
@@ -199,7 +199,7 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 		t.Logf("Warning: Failed to save kubeconfig: %v", err)
 	}
 
-	// Execute the install script now that the kubeconfig is available
+	// Execute the installation script now that the kubeconfig is available
 	installScriptPath := fmt.Sprintf("%s/install.sh", haDir)
 	log.Printf("Executing install script at %s", installScriptPath)
 
@@ -650,7 +650,7 @@ echo "Rancher installation complete!"`, helmCommand)
 		log.Printf("Created directory %s", absHADir)
 	}
 
-	// Use absolute path for the install script
+	// Use absolute path for the installation script
 	absInstallScriptPath := filepath.Join(absHADir, "install.sh")
 	writeFile(absInstallScriptPath, []byte(installScript))
 

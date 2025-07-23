@@ -75,13 +75,13 @@ locals {
 resource "aws_instance" "aws_instance" {
   count                  = 3
   ami                    = var.aws_ami
-  instance_type          = "t3a.large"
+  instance_type          = "c7gd.xlarge"
   subnet_id              = var.aws_subnet_id
   vpc_security_group_ids = [var.aws_security_group_id]
   key_name               = var.aws_pem_key_name
 
     root_block_device {
-      volume_size = 200
+      volume_size = 256
       tags = {
         Name = "${local.name_prefix}-${count.index + 1}"
         DoNotDelete = "True"
