@@ -98,11 +98,6 @@ For available RKE2 Kubernetes versions, refer to: [RKE2 v1.32.X Release Notes](h
 - The install script is automatically executed for each HA instance during setup
 
 ```yaml
-aws:
-  rsa_private_key: |
-    -----BEGIN RSA PRIVATE KEY-----
-    -----END RSA PRIVATE KEY-----
-
 rancher:
   helm_commands:
     - |

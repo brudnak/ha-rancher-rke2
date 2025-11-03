@@ -79,6 +79,7 @@ resource "aws_instance" "aws_instance" {
   subnet_id              = var.aws_subnet_id
   vpc_security_group_ids = [var.aws_security_group_id]
   key_name               = var.aws_pem_key_name
+  iam_instance_profile   = aws_iam_instance_profile.ssm_profile.name
 
     root_block_device {
       volume_size = 200

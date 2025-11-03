@@ -1,7 +1,7 @@
 package test
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,10 +15,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2Types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/brudnak/ha-rancher-rke2/terratest/hcl"
 
 	"github.com/gruntwork-io/terratest/modules/terraform"
-	"golang.org/x/crypto/ssh"
 
 	"github.com/spf13/viper"
 )
@@ -45,7 +51,7 @@ func TestHaSetup(t *testing.T) {
 	// Validate that the number of Helm commands matches the number of HA instances
 	helmCommands := viper.GetStringSlice("rancher.helm_commands")
 	if len(helmCommands) != totalHAs {
-		t.Fatalf("Number of Helm commands (%d) does not match the number of HA instances (%d). Please ensure you have exactly %d Helm commands in your configuration.", 
+		t.Fatalf("Number of Helm commands (%d) does not match the number of HA instances (%d). Please ensure you have exactly %d Helm commands in your configuration.",
 			len(helmCommands), totalHAs, totalHAs)
 	}
 
@@ -135,7 +141,7 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 	if strings.Contains(helmCommand, "--set hostname=") {
 		// Replace the hostname with the RancherURL from Terraform outputs
 		helmCommand = strings.Replace(
-			helmCommand, 
+			helmCommand,
 			"--set hostname="+strings.Split(strings.Split(helmCommand, "--set hostname=")[1], " ")[0],
 			"--set hostname="+haOutputs.RancherURL,
 			1,
@@ -256,6 +262,211 @@ func TestHACleanup(t *testing.T) {
 	cleanupTerraformFiles()
 }
 
+// Global AWS clients (initialized once)
+var (
+	ssmClient *ssm.Client
+	ec2Client *ec2.Client
+)
+
+// initAWSClients initializes AWS SDK clients
+func initAWSClients() error {
+	if ssmClient != nil {
+		return nil // Already initialized
+	}
+
+	ctx := context.Background()
+
+	// Get AWS region - try tf_vars first, then aws config
+	region := viper.GetString("tf_vars.aws_region")
+	if region == "" {
+		region = viper.GetString("aws.region")
+	}
+	if region == "" {
+		region = "us-east-2" // Default
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(region),
+		config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(
+				viper.GetString("tf_vars.aws_access_key"),
+				viper.GetString("tf_vars.aws_secret_key"),
+				"", // session token (empty for non-temporary credentials)
+			),
+		),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	ssmClient = ssm.NewFromConfig(cfg)
+	ec2Client = ec2.NewFromConfig(cfg)
+
+	log.Printf("AWS clients initialized for region: %s", region)
+	return nil
+}
+
+// getInstanceIDFromIP finds the instance ID given a public IP address
+func getInstanceIDFromIP(publicIP string) (string, error) {
+	if err := initAWSClients(); err != nil {
+		return "", err
+	}
+
+	ctx := context.Background()
+
+	input := &ec2.DescribeInstancesInput{
+		Filters: []ec2Types.Filter{
+			{
+				Name:   aws.String("ip-address"),
+				Values: []string{publicIP},
+			},
+			{
+				Name:   aws.String("instance-state-name"),
+				Values: []string{"running"},
+			},
+		},
+	}
+
+	result, err := ec2Client.DescribeInstances(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("failed to describe instances: %w", err)
+	}
+
+	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
+		return "", fmt.Errorf("no running instance found with IP %s", publicIP)
+	}
+
+	instanceID := aws.ToString(result.Reservations[0].Instances[0].InstanceId)
+	log.Printf("Resolved IP %s to instance %s", publicIP, instanceID)
+
+	return instanceID, nil
+}
+
+// waitForSSMAgent waits for SSM agent to be online
+func waitForSSMAgent(instanceID string, maxSeconds int) error {
+	if err := initAWSClients(); err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+
+	log.Printf("Waiting for SSM agent on %s to be online...", instanceID)
+
+	for i := 0; i < maxSeconds; i++ {
+		input := &ssm.DescribeInstanceInformationInput{
+			Filters: []types.InstanceInformationStringFilter{
+				{
+					Key:    aws.String("InstanceIds"),
+					Values: []string{instanceID},
+				},
+			},
+		}
+
+		result, err := ssmClient.DescribeInstanceInformation(ctx, input)
+		if err == nil && len(result.InstanceInformationList) > 0 {
+			status := result.InstanceInformationList[0].PingStatus
+			if status == types.PingStatusOnline {
+				log.Printf("SSM agent is online for %s", instanceID)
+				return nil
+			}
+		}
+
+		if i%10 == 0 && i > 0 {
+			log.Printf("Still waiting for SSM agent... (%d seconds)", i)
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	return fmt.Errorf("SSM agent did not come online after %d seconds", maxSeconds)
+}
+
+// runCommandSSM executes a command via SSM and returns the output
+func runCommandSSM(cmd string, instanceID string) (string, error) {
+	if err := initAWSClients(); err != nil {
+		return "", err
+	}
+
+	ctx := context.Background()
+
+	// Send command
+	sendInput := &ssm.SendCommandInput{
+		InstanceIds:  []string{instanceID},
+		DocumentName: aws.String("AWS-RunShellScript"),
+		Parameters: map[string][]string{
+			"commands": {cmd},
+		},
+		TimeoutSeconds: aws.Int32(600),
+	}
+
+	sendOutput, err := ssmClient.SendCommand(ctx, sendInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to send SSM command: %w", err)
+	}
+
+	commandID := sendOutput.Command.CommandId
+
+	// Wait for command to complete
+	maxAttempts := 120 // 10 minutes (120 * 5 seconds)
+	for i := 0; i < maxAttempts; i++ {
+		time.Sleep(5 * time.Second)
+
+		getInput := &ssm.GetCommandInvocationInput{
+			CommandId:  commandID,
+			InstanceId: aws.String(instanceID),
+		}
+
+		getOutput, err := ssmClient.GetCommandInvocation(ctx, getInput)
+		if err != nil {
+			// Command might not be ready yet
+			continue
+		}
+
+		status := getOutput.Status
+
+		switch status {
+		case types.CommandInvocationStatusSuccess:
+			output := aws.ToString(getOutput.StandardOutputContent)
+			// Trim trailing newlines to match SSH behavior
+			return strings.TrimRight(output, "\r\n"), nil
+
+		case types.CommandInvocationStatusFailed,
+			types.CommandInvocationStatusTimedOut,
+			types.CommandInvocationStatusCancelled:
+			stderr := aws.ToString(getOutput.StandardErrorContent)
+			stdout := aws.ToString(getOutput.StandardOutputContent)
+			return "", fmt.Errorf("command failed with status %s\nstdout: %s\nstderr: %s",
+				status, stdout, stderr)
+
+		case types.CommandInvocationStatusInProgress,
+			types.CommandInvocationStatusPending:
+			// Still running
+			if i%12 == 0 && i > 0 {
+				log.Printf("Command still running... (%d seconds)", i*5)
+			}
+			continue
+		}
+	}
+
+	return "", fmt.Errorf("command timed out after %d attempts", maxAttempts)
+}
+
+// RunCommand is the drop-in replacement - same signature, uses SSM instead of SSH
+func RunCommand(cmd string, pubIP string) (string, error) {
+	// Get instance ID from IP
+	instanceID, err := getInstanceIDFromIP(pubIP)
+	if err != nil {
+		return "", fmt.Errorf("failed to get instance ID from IP %s: %w", pubIP, err)
+	}
+
+	// Wait for SSM agent to be online (max 120 seconds for newly created instances)
+	if err := waitForSSMAgent(instanceID, 120); err != nil {
+		return "", fmt.Errorf("SSM agent not ready for instance %s: %w", instanceID, err)
+	}
+
+	// Execute command via SSM
+	return runCommandSSM(cmd, instanceID)
+}
+
 func setupConfig(t *testing.T) {
 	viper.AddConfigPath("../")
 	viper.SetConfigName("tool-config")
@@ -331,53 +542,6 @@ func getHAOutputs(instanceNum int, outputs map[string]string) TerraformOutputs {
 		LoadBalancerDNS:  outputs[fmt.Sprintf("%s_aws_lb", prefix)],
 		RancherURL:       outputs[fmt.Sprintf("%s_rancher_url", prefix)],
 	}
-}
-
-func RunCommand(cmd string, pubIP string) (string, error) {
-	pemKey := viper.GetString("aws.rsa_private_key")
-	dialIP := fmt.Sprintf("%s:22", pubIP)
-	signer, err := ssh.ParsePrivateKey([]byte(pemKey))
-	if err != nil {
-		return "", fmt.Errorf("failed to parse private key: %w", err)
-	}
-
-	config := &ssh.ClientConfig{
-		User:            "ubuntu",
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-
-	conn, err := ssh.Dial("tcp", dialIP, config)
-	if err != nil {
-		return "", fmt.Errorf("failed to establish ssh connection: %w", err)
-	}
-	defer func() {
-		if err := conn.Close(); err != nil {
-			log.Println(err)
-		}
-	}()
-
-	session, err := conn.NewSession()
-	if err != nil {
-		return "", fmt.Errorf("failed to create new ssh session: %w", err)
-	}
-	defer func() {
-		if err := session.Close(); err != nil {
-			log.Println(err)
-		}
-	}()
-
-	var stdoutBuf bytes.Buffer
-	session.Stdout = &stdoutBuf
-	err = session.Run(cmd)
-	if err != nil {
-		return "", fmt.Errorf("failed to run ssh command: %w", err)
-	}
-
-	stringOut := stdoutBuf.String()
-	stringOut = strings.TrimRight(stringOut, "\r\n")
-
-	return stringOut, nil
 }
 
 func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
