@@ -492,6 +492,48 @@ func RunCommand(cmd string, pubIP string) (string, error) {
 	return result, nil
 }
 
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+// buildRKE2InstallCommand downloads the version-pinned RKE2 installer script,
+// checks that it matches the pinned SHA256, and only then executes it.
+func buildRKE2InstallCommand(nodeType string) (string, error) {
+	rke2Version := viper.GetString("k8s.version")
+	expectedInstallerSHA256 := viper.GetString("rke2.install_script_sha256")
+	if rke2Version == "" {
+		return "", fmt.Errorf("k8s.version must be set")
+	}
+	if expectedInstallerSHA256 == "" {
+		return "", fmt.Errorf("rke2.install_script_sha256 must be set")
+	}
+
+	installScriptURL := fmt.Sprintf("https://raw.githubusercontent.com/rancher/rke2/%s/install.sh", rke2Version)
+
+	return fmt.Sprintf(`tmp_script="$(mktemp /tmp/rke2-install.XXXXXX.sh)"
+trap 'rm -f "$tmp_script"' EXIT
+
+# Download the exact installer script for the requested RKE2 version.
+curl -fsSL -o "$tmp_script" %s
+
+# Refuse to execute the script unless it matches the pinned checksum.
+if ! echo %s"  $tmp_script" | sha256sum -c -; then
+  echo "############################################################" >&2
+  echo "# SECURITY ERROR: RKE2 installer checksum validation failed #" >&2
+  echo "# Refusing to run the downloaded installer.                #" >&2
+  echo "# Check k8s.version and rke2.install_script_sha256.        #" >&2
+  echo "############################################################" >&2
+  exit 1
+fi
+
+sudo INSTALL_RKE2_VERSION=%s INSTALL_RKE2_TYPE=%s sh "$tmp_script"`,
+		shellSingleQuote(installScriptURL),
+		shellSingleQuote(expectedInstallerSHA256),
+		shellSingleQuote(rke2Version),
+		shellSingleQuote(nodeType),
+	), nil
+}
+
 func setupConfig(t *testing.T) {
 	viper.AddConfigPath("../")
 	viper.SetConfigName("tool-config")
@@ -698,7 +740,10 @@ func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
 
 	// Install RKE2 server
 	log.Printf("[setupFirstServerNode] Installing RKE2 version %s...", rke2K8sVersion)
-	cmd = fmt.Sprintf(`sudo sh -c 'curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION=%s INSTALL_RKE2_TYPE=server sh -'`, rke2K8sVersion)
+	cmd, err = buildRKE2InstallCommand("server")
+	if err != nil {
+		return fmt.Errorf("failed to build RKE2 install command: %w", err)
+	}
 	output, err = RunCommand(cmd, ip)
 	if err != nil {
 		log.Printf("[setupFirstServerNode] FAILED to install RKE2: %v", err)
@@ -937,7 +982,10 @@ tls-san:
 
 	// Install RKE2 server
 	log.Printf("[setupAdditionalServerNode] Installing RKE2 version %s on %s...", rke2K8sVersion, ip)
-	cmd = fmt.Sprintf(`sudo sh -c 'curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION=%s INSTALL_RKE2_TYPE=server sh -'`, rke2K8sVersion)
+	cmd, err = buildRKE2InstallCommand("server")
+	if err != nil {
+		return fmt.Errorf("failed to build RKE2 install command: %w", err)
+	}
 	_, err = RunCommand(cmd, ip)
 	if err != nil {
 		return fmt.Errorf("failed to install RKE2: %w", err)

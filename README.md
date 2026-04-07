@@ -96,6 +96,16 @@ For available RKE2 Kubernetes versions, refer to: [RKE2 v1.32.X Release Notes](h
   - You can leave it blank, use a placeholder, or include your own value (it will be overridden)
 - The tool will validate that the number of commands matches `total_has` and fail with an error if they don't match
 - The install script is automatically executed for each HA instance during setup
+- `k8s.version` is the RKE2 version to install
+- `rke2.install_script_sha256` is the SHA256 of the exact RKE2 installer script for that version
+- `rke2.preload_images: true` downloads the RKE2 image bundle before install to help avoid Docker Hub rate limits
+- `dockerhub.username` and `dockerhub.password` are optional
+  - If you set them, the tool creates `/etc/rancher/rke2/registries.yaml` so RKE2 can authenticate to Docker Hub
+  - If you leave them blank, the tool skips Docker Hub authentication
+- The project does not use `curl | sh` for the RKE2 installer anymore
+  - It downloads the versioned installer script
+  - It checks that script against the pinned SHA256
+  - It only runs the script if the checksum matches
 
 ```yaml
 rancher:
@@ -107,8 +117,8 @@ rancher:
         --set bootstrapPassword=your-password \
         --set tls=external \
         --set global.cattle.psp.enabled=false \
-        --set rancherImageTag=v2.11.0 \
-        --version 2.11.0 \
+        --set rancherImageTag=v2.14.0 \
+        --version 2.14.0 \
         --set agentTLSMode=system-store
     - |
       helm install rancher rancher-latest/rancher \
@@ -117,16 +127,21 @@ rancher:
         --set bootstrapPassword=your-password \
         --set tls=external \
         --set global.cattle.psp.enabled=false \
-        --set rancherImageTag=v2.11.0 \
-        --version 2.11.0 \
+        --set rancherImageTag=v2.14.0 \
+        --version 2.14.0 \
         --set agentTLSMode=system-store
       
 k8s:
-  version: "v1.31.4+rke2r1"
+  version: "v1.33.7+rke2r1"
+
+rke2:
+  install_script_sha256: "bfbd978d603b7070f5748c934326db509bf1470c97d3f61a3aaa6e2eed6bd054"
+  preload_images: true
 
 total_has: 2  # Number of HA clusters to create (must match number of helm_commands)
 
 tf_vars:
+  aws_region: "us-east-2"
   aws_access_key: "super-secret-key"
   aws_secret_key: "super-secret-key"
   aws_prefix: "xyz" # your initials, keep it short! 
@@ -139,7 +154,49 @@ tf_vars:
   aws_security_group_id: ""
   aws_pem_key_name: ""
   aws_route53_fqdn: ""
+
+dockerhub:
+  username: ""
+  password: ""
 ```
+
+If you do not want Docker Hub authentication, leave both `dockerhub.username` and `dockerhub.password` blank.
+
+### Updating the RKE2 checksum
+
+You only need to update `rke2.install_script_sha256` when you change `k8s.version`.
+
+1. Pick the RKE2 version you want.
+2. Download that exact installer script.
+3. Compute its SHA256.
+4. Paste the hash into `tool-config.yml`.
+
+Run:
+
+```bash
+export RKE2_VERSION="v1.33.7+rke2r1"
+curl -fsSL "https://raw.githubusercontent.com/rancher/rke2/${RKE2_VERSION}/install.sh" -o /tmp/rke2-install.sh
+shasum -a 256 /tmp/rke2-install.sh
+```
+
+You will get output like:
+
+```text
+bfbd978d603b7070f5748c934326db509bf1470c97d3f61a3aaa6e2eed6bd054  /tmp/rke2-install.sh
+```
+
+Copy only the hash on the left and put it into `tool-config.yml`:
+
+```yaml
+k8s:
+  version: "v1.33.7+rke2r1"
+
+rke2:
+  install_script_sha256: "bfbd978d603b7070f5748c934326db509bf1470c97d3f61a3aaa6e2eed6bd054"
+  preload_images: true
+```
+
+If the downloaded installer does not match the pinned hash, the setup stops immediately and refuses to run it.
 
 ## Output Example
 
