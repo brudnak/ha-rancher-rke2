@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -388,6 +389,8 @@ func runCommandSSM(cmd string, instanceID string) (string, error) {
 
 	ctx := context.Background()
 
+	log.Printf("[SSM] Sending command to instance %s: %s", instanceID, cmd)
+
 	// Send command
 	sendInput := &ssm.SendCommandInput{
 		InstanceIds:  []string{instanceID},
@@ -404,6 +407,7 @@ func runCommandSSM(cmd string, instanceID string) (string, error) {
 	}
 
 	commandID := sendOutput.Command.CommandId
+	log.Printf("[SSM] Command sent with ID: %s", *commandID)
 
 	// Wait for command to complete
 	maxAttempts := 120 // 10 minutes (120 * 5 seconds)
@@ -426,14 +430,26 @@ func runCommandSSM(cmd string, instanceID string) (string, error) {
 		switch status {
 		case types.CommandInvocationStatusSuccess:
 			output := aws.ToString(getOutput.StandardOutputContent)
+			stderr := aws.ToString(getOutput.StandardErrorContent)
+
+			// Log stderr if present (could be warnings)
+			if stderr != "" {
+				log.Printf("[SSM] Command stderr: %s", stderr)
+			}
+
 			// Trim trailing newlines to match SSH behavior
-			return strings.TrimRight(output, "\r\n"), nil
+			trimmedOutput := strings.TrimRight(output, "\r\n")
+			log.Printf("[SSM] Command completed successfully. Output length: %d bytes", len(trimmedOutput))
+			return trimmedOutput, nil
 
 		case types.CommandInvocationStatusFailed,
 			types.CommandInvocationStatusTimedOut,
 			types.CommandInvocationStatusCancelled:
 			stderr := aws.ToString(getOutput.StandardErrorContent)
 			stdout := aws.ToString(getOutput.StandardOutputContent)
+			log.Printf("[SSM] Command FAILED with status %s", status)
+			log.Printf("[SSM] stdout: %s", stdout)
+			log.Printf("[SSM] stderr: %s", stderr)
 			return "", fmt.Errorf("command failed with status %s\nstdout: %s\nstderr: %s",
 				status, stdout, stderr)
 
@@ -441,7 +457,7 @@ func runCommandSSM(cmd string, instanceID string) (string, error) {
 			types.CommandInvocationStatusPending:
 			// Still running
 			if i%12 == 0 && i > 0 {
-				log.Printf("Command still running... (%d seconds)", i*5)
+				log.Printf("[SSM] Command still running... (%d seconds)", i*5)
 			}
 			continue
 		}
@@ -452,6 +468,8 @@ func runCommandSSM(cmd string, instanceID string) (string, error) {
 
 // RunCommand is the drop-in replacement - same signature, uses SSM instead of SSH
 func RunCommand(cmd string, pubIP string) (string, error) {
+	log.Printf("[RunCommand] Starting command execution for IP %s", pubIP)
+
 	// Get instance ID from IP
 	instanceID, err := getInstanceIDFromIP(pubIP)
 	if err != nil {
@@ -464,7 +482,14 @@ func RunCommand(cmd string, pubIP string) (string, error) {
 	}
 
 	// Execute command via SSM
-	return runCommandSSM(cmd, instanceID)
+	result, err := runCommandSSM(cmd, instanceID)
+	if err != nil {
+		log.Printf("[RunCommand] Command failed: %v", err)
+		return "", err
+	}
+
+	log.Printf("[RunCommand] Command completed successfully")
+	return result, nil
 }
 
 func setupConfig(t *testing.T) {
@@ -545,12 +570,17 @@ func getHAOutputs(instanceNum int, outputs map[string]string) TerraformOutputs {
 }
 
 func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
+	log.Printf("[setupFirstServerNode] Starting setup for IP %s", ip)
+
 	// Create config directory
+	log.Printf("[setupFirstServerNode] Creating config directory...")
 	cmd := "sudo mkdir -p /etc/rancher/rke2"
-	_, err := RunCommand(cmd, ip)
+	output, err := RunCommand(cmd, ip)
 	if err != nil {
+		log.Printf("[setupFirstServerNode] FAILED to create config directory: %v", err)
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
+	log.Printf("[setupFirstServerNode] Config directory created. Output: %s", output)
 
 	configContent := fmt.Sprintf(`tls-san:
   - %s
@@ -568,59 +598,241 @@ func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
 		haOutputs.Server3IP,
 		haOutputs.Server3PrivateIP)
 
+	log.Printf("[setupFirstServerNode] Creating config file with content:\n%s", configContent)
 	cmd = fmt.Sprintf("sudo bash -c 'cat > /etc/rancher/rke2/config.yaml << EOL\n%s\nEOL'", configContent)
-	_, err = RunCommand(cmd, ip)
+	output, err = RunCommand(cmd, ip)
 	if err != nil {
+		log.Printf("[setupFirstServerNode] FAILED to create config file: %v", err)
 		return fmt.Errorf("failed to create config file: %w", err)
+	}
+	log.Printf("[setupFirstServerNode] Config file created. Output: %s", output)
+
+	// Verify config file was created
+	log.Printf("[setupFirstServerNode] Verifying config file...")
+	cmd = "sudo cat /etc/rancher/rke2/config.yaml"
+	output, err = RunCommand(cmd, ip)
+	if err != nil {
+		log.Printf("[setupFirstServerNode] WARNING: Could not read config file: %v", err)
+	} else {
+		log.Printf("[setupFirstServerNode] Config file contents:\n%s", output)
+	}
+
+	// Check if we should pre-download RKE2 images to avoid Docker Hub rate limiting
+	preloadImages := viper.GetBool("rke2.preload_images")
+	rke2K8sVersion := viper.GetString("k8s.version")
+
+	if preloadImages {
+		log.Printf("[setupFirstServerNode] Pre-downloading RKE2 images to avoid Docker Hub rate limiting...")
+
+		// Create images directory
+		cmd = "sudo mkdir -p /var/lib/rancher/rke2/agent/images"
+		output, err = RunCommand(cmd, ip)
+		if err != nil {
+			log.Printf("[setupFirstServerNode] FAILED to create images directory: %v", err)
+			return fmt.Errorf("failed to create images directory: %w", err)
+		}
+		log.Printf("[setupFirstServerNode] Images directory created")
+
+		// Download images tarball
+		imagesURL := fmt.Sprintf("https://github.com/rancher/rke2/releases/download/%s/rke2-images.linux-amd64.tar.zst", rke2K8sVersion)
+		log.Printf("[setupFirstServerNode] Downloading images from %s (this may take a few minutes)...", imagesURL)
+		cmd = fmt.Sprintf("curl -sfL %s -o /tmp/rke2-images.tar.zst", imagesURL)
+		output, err = RunCommand(cmd, ip)
+		if err != nil {
+			log.Printf("[setupFirstServerNode] FAILED to download images: %v", err)
+			return fmt.Errorf("failed to download RKE2 images: %w", err)
+		}
+		log.Printf("[setupFirstServerNode] Images downloaded successfully")
+
+		// Move images to RKE2 directory
+		cmd = "sudo mv /tmp/rke2-images.tar.zst /var/lib/rancher/rke2/agent/images/"
+		output, err = RunCommand(cmd, ip)
+		if err != nil {
+			log.Printf("[setupFirstServerNode] FAILED to move images: %v", err)
+			return fmt.Errorf("failed to move images: %w", err)
+		}
+		log.Printf("[setupFirstServerNode] Images pre-loaded successfully")
+	} else {
+		log.Printf("[setupFirstServerNode] Image pre-loading disabled, will pull from registry")
+	}
+
+	// Create registries.yaml with Docker Hub authentication if credentials are provided
+	dockerUsername := viper.GetString("dockerhub.username")
+	dockerPassword := viper.GetString("dockerhub.password")
+
+	if dockerUsername != "" && dockerPassword != "" {
+		log.Printf("[setupFirstServerNode] Configuring Docker Hub authentication...")
+
+		// Containerd requires base64 encoded "username:password" format
+		authString := fmt.Sprintf("%s:%s", dockerUsername, dockerPassword)
+		encodedAuth := base64.StdEncoding.EncodeToString([]byte(authString))
+
+		registriesConfig := fmt.Sprintf(`configs:
+  "registry-1.docker.io":
+    auth:
+      auth: %s
+  "docker.io":
+    auth:
+      auth: %s`, encodedAuth, encodedAuth)
+
+		cmd = fmt.Sprintf("sudo bash -c 'cat > /etc/rancher/rke2/registries.yaml << EOL\n%s\nEOL'", registriesConfig)
+		output, err = RunCommand(cmd, ip)
+		if err != nil {
+			log.Printf("[setupFirstServerNode] FAILED to create registries.yaml: %v", err)
+			return fmt.Errorf("failed to create registries.yaml: %w", err)
+		}
+		log.Printf("[setupFirstServerNode] Docker Hub authentication configured with base64 encoded credentials")
+
+		// Verify registries.yaml was created
+		log.Printf("[setupFirstServerNode] Verifying registries.yaml...")
+		cmd = "sudo cat /etc/rancher/rke2/registries.yaml"
+		output, err = RunCommand(cmd, ip)
+		if err != nil {
+			log.Printf("[setupFirstServerNode] WARNING: Could not read registries.yaml: %v", err)
+		} else {
+			log.Printf("[setupFirstServerNode] Registries.yaml contents:\n%s", output)
+		}
+	} else {
+		log.Printf("[setupFirstServerNode] No Docker Hub credentials provided, skipping registries.yaml creation")
 	}
 
 	// Install RKE2 server
-	rke2K8sVersion := viper.GetString("k8s.version")
-	// Fixed command
+	log.Printf("[setupFirstServerNode] Installing RKE2 version %s...", rke2K8sVersion)
 	cmd = fmt.Sprintf(`sudo sh -c 'curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION=%s INSTALL_RKE2_TYPE=server sh -'`, rke2K8sVersion)
-	_, err = RunCommand(cmd, ip)
+	output, err = RunCommand(cmd, ip)
 	if err != nil {
+		log.Printf("[setupFirstServerNode] FAILED to install RKE2: %v", err)
+		log.Printf("[setupFirstServerNode] Install output: %s", output)
 		return fmt.Errorf("failed to install RKE2: %w", err)
 	}
+	log.Printf("[setupFirstServerNode] RKE2 installed successfully. Output: %s", output)
+
+	// Verify RKE2 binary exists
+	log.Printf("[setupFirstServerNode] Verifying RKE2 binary...")
+	cmd = "which rke2 || ls -la /usr/local/bin/rke2 || echo 'RKE2 binary not found in expected locations'"
+	output, err = RunCommand(cmd, ip)
+	log.Printf("[setupFirstServerNode] RKE2 binary check: %s", output)
 
 	// Enable RKE2 server
+	log.Printf("[setupFirstServerNode] Enabling RKE2 server service...")
 	cmd = "sudo systemctl enable rke2-server.service"
-	_, err = RunCommand(cmd, ip)
+	output, err = RunCommand(cmd, ip)
 	if err != nil {
+		log.Printf("[setupFirstServerNode] FAILED to enable RKE2 server: %v", err)
 		return fmt.Errorf("failed to enable RKE2 server: %w", err)
 	}
+	log.Printf("[setupFirstServerNode] RKE2 server enabled. Output: %s", output)
 
-	cmd = "sudo systemctl start rke2-server.service &"
-	_, err = RunCommand(cmd, ip)
+	// Start RKE2 server
+	log.Printf("[setupFirstServerNode] Starting RKE2 server service...")
+	cmd = "sudo systemctl start rke2-server.service"
+	output, err = RunCommand(cmd, ip)
 	if err != nil {
+		log.Printf("[setupFirstServerNode] FAILED to start RKE2 server: %v", err)
+
+		// Get detailed error information
+		log.Printf("[setupFirstServerNode] Gathering diagnostic information...")
+
+		// Get service status
+		cmd = "sudo systemctl status rke2-server.service --no-pager"
+		statusOutput, statusErr := RunCommand(cmd, ip)
+		if statusErr == nil {
+			log.Printf("[setupFirstServerNode] Service status:\n%s", statusOutput)
+		} else {
+			log.Printf("[setupFirstServerNode] Could not get service status: %v", statusErr)
+		}
+
+		// Get recent logs
+		cmd = "sudo journalctl -u rke2-server.service --no-pager -n 100"
+		logsOutput, logsErr := RunCommand(cmd, ip)
+		if logsErr == nil {
+			log.Printf("[setupFirstServerNode] Recent logs:\n%s", logsOutput)
+		} else {
+			log.Printf("[setupFirstServerNode] Could not get logs: %v", logsErr)
+		}
+
 		return fmt.Errorf("failed to start RKE2 server: %w", err)
 	}
+	log.Printf("[setupFirstServerNode] RKE2 server start command completed. Output: %s", output)
+
+	// Check service status immediately
+	log.Printf("[setupFirstServerNode] Checking initial service status...")
+	cmd = "sudo systemctl status rke2-server.service"
+	output, _ = RunCommand(cmd, ip)
+	log.Printf("[setupFirstServerNode] Service status:\n%s", output)
 
 	// Wait for RKE2 to be ready by polling for the node-token file
-	log.Printf("Waiting for RKE2 to initialize on %s (this may take several minutes)...", ip)
+	log.Printf("[setupFirstServerNode] Waiting for RKE2 to initialize on %s (this may take several minutes)...", ip)
 	maxRetries := 30 // 5 minutes (30 * 10 seconds)
 	for i := 0; i < maxRetries; i++ {
-		// Check if the node-token file exists, which indicates RKE2 is initialized
+		log.Printf("[setupFirstServerNode] Attempt %d/%d: Checking for node-token file...", i+1, maxRetries)
+
+		// Check if the node-token file exists
 		cmd = "sudo test -f /var/lib/rancher/rke2/server/node-token && echo 'ready' || echo 'not-ready'"
 		status, err := RunCommand(cmd, ip)
+		log.Printf("[setupFirstServerNode] Node-token check result: '%s'", status)
+
 		if err == nil && strings.TrimSpace(status) == "ready" {
-			log.Printf("RKE2 initialized successfully on %s", ip)
+			log.Printf("[setupFirstServerNode] RKE2 initialized successfully on %s", ip)
+
+			// Verify we can actually read the token
+			cmd = "sudo cat /var/lib/rancher/rke2/server/node-token"
+			token, tokenErr := RunCommand(cmd, ip)
+			if tokenErr != nil {
+				log.Printf("[setupFirstServerNode] WARNING: Token file exists but cannot read it: %v", tokenErr)
+			} else {
+				log.Printf("[setupFirstServerNode] Token successfully read (length: %d)", len(token))
+			}
+
 			return nil
 		}
 
+		// Check service status for diagnostics
+		if i%3 == 0 { // Check every 3 attempts (every 30 seconds)
+			log.Printf("[setupFirstServerNode] Checking service status (attempt %d)...", i+1)
+			cmd = "sudo systemctl status rke2-server.service --no-pager"
+			statusOutput, _ := RunCommand(cmd, ip)
+			log.Printf("[setupFirstServerNode] Service status:\n%s", statusOutput)
+
+			// Check for any obvious errors in journalctl
+			log.Printf("[setupFirstServerNode] Checking recent logs...")
+			cmd = "sudo journalctl -u rke2-server.service --no-pager -n 20"
+			logsOutput, _ := RunCommand(cmd, ip)
+			log.Printf("[setupFirstServerNode] Recent logs:\n%s", logsOutput)
+		}
+
 		// Wait 10 seconds before checking again
+		log.Printf("[setupFirstServerNode] Waiting 10 seconds before next check...")
 		time.Sleep(10 * time.Second)
 	}
+
+	// Final diagnostic dump before giving up
+	log.Printf("[setupFirstServerNode] TIMEOUT: Final diagnostic information:")
+
+	cmd = "sudo systemctl status rke2-server.service --no-pager"
+	output, _ = RunCommand(cmd, ip)
+	log.Printf("[setupFirstServerNode] Final service status:\n%s", output)
+
+	cmd = "sudo journalctl -u rke2-server.service --no-pager -n 50"
+	output, _ = RunCommand(cmd, ip)
+	log.Printf("[setupFirstServerNode] Last 50 log lines:\n%s", output)
+
+	cmd = "sudo ls -la /var/lib/rancher/rke2/server/"
+	output, _ = RunCommand(cmd, ip)
+	log.Printf("[setupFirstServerNode] Contents of /var/lib/rancher/rke2/server/:\n%s", output)
 
 	return fmt.Errorf("timeout waiting for RKE2 to initialize on %s", ip)
 }
 
 func getNodeToken(ip string) (string, error) {
+	log.Printf("[getNodeToken] Retrieving node token from %s", ip)
 	cmd := "sudo cat /var/lib/rancher/rke2/server/node-token"
 	token, err := RunCommand(cmd, ip)
 	if err != nil {
+		log.Printf("[getNodeToken] FAILED to get node token: %v", err)
 		return "", fmt.Errorf("failed to get node token: %w", err)
 	}
+	log.Printf("[getNodeToken] Token retrieved successfully (length: %d)", len(token))
 	return token, nil
 }
 
@@ -658,8 +870,73 @@ tls-san:
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
 
-	// Install RKE2 server
+	// Check if we should pre-download RKE2 images to avoid Docker Hub rate limiting
+	preloadImages := viper.GetBool("rke2.preload_images")
 	rke2K8sVersion := viper.GetString("k8s.version")
+
+	if preloadImages {
+		log.Printf("[setupAdditionalServerNode] Pre-downloading RKE2 images for %s...", ip)
+
+		// Create images directory
+		cmd = "sudo mkdir -p /var/lib/rancher/rke2/agent/images"
+		_, err = RunCommand(cmd, ip)
+		if err != nil {
+			log.Printf("[setupAdditionalServerNode] FAILED to create images directory: %v", err)
+			return fmt.Errorf("failed to create images directory: %w", err)
+		}
+
+		// Download images tarball
+		imagesURL := fmt.Sprintf("https://github.com/rancher/rke2/releases/download/%s/rke2-images.linux-amd64.tar.zst", rke2K8sVersion)
+		log.Printf("[setupAdditionalServerNode] Downloading images from %s...", imagesURL)
+		cmd = fmt.Sprintf("curl -sfL %s -o /tmp/rke2-images.tar.zst", imagesURL)
+		_, err = RunCommand(cmd, ip)
+		if err != nil {
+			log.Printf("[setupAdditionalServerNode] FAILED to download images: %v", err)
+			return fmt.Errorf("failed to download RKE2 images: %w", err)
+		}
+
+		// Move images to RKE2 directory
+		cmd = "sudo mv /tmp/rke2-images.tar.zst /var/lib/rancher/rke2/agent/images/"
+		_, err = RunCommand(cmd, ip)
+		if err != nil {
+			log.Printf("[setupAdditionalServerNode] FAILED to move images: %v", err)
+			return fmt.Errorf("failed to move images: %w", err)
+		}
+		log.Printf("[setupAdditionalServerNode] Images pre-loaded successfully for %s", ip)
+	}
+
+	// Create registries.yaml with Docker Hub authentication if credentials are provided
+	dockerUsername := viper.GetString("dockerhub.username")
+	dockerPassword := viper.GetString("dockerhub.password")
+
+	if dockerUsername != "" && dockerPassword != "" {
+		log.Printf("[setupAdditionalServerNode] Configuring Docker Hub authentication for %s...", ip)
+
+		// Containerd requires base64 encoded "username:password" format
+		authString := fmt.Sprintf("%s:%s", dockerUsername, dockerPassword)
+		encodedAuth := base64.StdEncoding.EncodeToString([]byte(authString))
+
+		registriesConfig := fmt.Sprintf(`configs:
+  "registry-1.docker.io":
+    auth:
+      auth: %s
+  "docker.io":
+    auth:
+      auth: %s`, encodedAuth, encodedAuth)
+
+		cmd = fmt.Sprintf("sudo bash -c 'cat > /etc/rancher/rke2/registries.yaml << EOL\n%s\nEOL'", registriesConfig)
+		_, err = RunCommand(cmd, ip)
+		if err != nil {
+			log.Printf("[setupAdditionalServerNode] FAILED to create registries.yaml: %v", err)
+			return fmt.Errorf("failed to create registries.yaml: %w", err)
+		}
+		log.Printf("[setupAdditionalServerNode] Docker Hub authentication configured for %s with base64 encoded credentials", ip)
+	} else {
+		log.Printf("[setupAdditionalServerNode] No Docker Hub credentials provided, skipping registries.yaml creation for %s", ip)
+	}
+
+	// Install RKE2 server
+	log.Printf("[setupAdditionalServerNode] Installing RKE2 version %s on %s...", rke2K8sVersion, ip)
 	cmd = fmt.Sprintf(`sudo sh -c 'curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION=%s INSTALL_RKE2_TYPE=server sh -'`, rke2K8sVersion)
 	_, err = RunCommand(cmd, ip)
 	if err != nil {
@@ -673,7 +950,7 @@ tls-san:
 		return fmt.Errorf("failed to enable RKE2 server: %w", err)
 	}
 
-	cmd = "sudo systemctl start rke2-server.service &"
+	cmd = "sudo systemctl start rke2-server.service"
 	_, err = RunCommand(cmd, ip)
 	if err != nil {
 		return fmt.Errorf("failed to start RKE2 server: %w", err)
