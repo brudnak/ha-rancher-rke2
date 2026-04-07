@@ -85,14 +85,12 @@ resource "aws_instance" "aws_instance" {
       volume_size = 200
       tags = {
         Name = "${local.name_prefix}-${count.index + 1}"
-        DoNotDelete = "True"
         Owner = "${var.aws_prefix}-terraform"
       }
     }
 
     tags = {
       Name = "${local.name_prefix}-${count.index + 1}"
-      DoNotDelete = "True"
       Owner = "${var.aws_prefix}-terraform"
     }
 }
