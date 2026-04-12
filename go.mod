@@ -1,6 +1,6 @@
 module github.com/brudnak/ha-rancher-rke2
 
-go 1.23.6
+go 1.26.1
 
 require (
 	github.com/gruntwork-io/terratest v0.48.2

@@ -2,12 +2,16 @@ package test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +58,10 @@ func TestHaSetup(t *testing.T) {
 	if len(helmCommands) != totalHAs {
 		t.Fatalf("Number of Helm commands (%d) does not match the number of HA instances (%d). Please ensure you have exactly %d Helm commands in your configuration.",
 			len(helmCommands), totalHAs, totalHAs)
+	}
+
+	if err := validatePinnedRKE2InstallerChecksum(); err != nil {
+		t.Fatalf("RKE2 installer checksum preflight failed before provisioning infrastructure: %v", err)
 	}
 
 	terraformOptions := getTerraformOptions(t, totalHAs)
@@ -442,14 +450,18 @@ func runCommandSSM(cmd string, instanceID string) (string, error) {
 			log.Printf("[SSM] Command completed successfully. Output length: %d bytes", len(trimmedOutput))
 			return trimmedOutput, nil
 
-		case types.CommandInvocationStatusFailed,
-			types.CommandInvocationStatusTimedOut,
-			types.CommandInvocationStatusCancelled:
-			stderr := aws.ToString(getOutput.StandardErrorContent)
-			stdout := aws.ToString(getOutput.StandardOutputContent)
-			log.Printf("[SSM] Command FAILED with status %s", status)
-			log.Printf("[SSM] Failure output sizes: stdout=%d bytes stderr=%d bytes", len(stdout), len(stderr))
-			return "", fmt.Errorf("command failed with status %s", status)
+			case types.CommandInvocationStatusFailed,
+				types.CommandInvocationStatusTimedOut,
+				types.CommandInvocationStatusCancelled:
+				stderr := aws.ToString(getOutput.StandardErrorContent)
+				stdout := aws.ToString(getOutput.StandardOutputContent)
+				log.Printf("[SSM] Command FAILED with status %s", status)
+				log.Printf("[SSM] Failure output sizes: stdout=%d bytes stderr=%d bytes", len(stdout), len(stderr))
+				if isRKE2InstallerChecksumFailure(stdout, stderr) {
+					log.Printf("[SSM] SECURITY ERROR: RKE2 installer checksum validation failed on remote node")
+					return "", fmt.Errorf("remote RKE2 installer checksum validation failed")
+				}
+				return "", fmt.Errorf("command failed with status %s", status)
 
 		case types.CommandInvocationStatusInProgress,
 			types.CommandInvocationStatusPending:
@@ -494,19 +506,65 @@ func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-// buildRKE2InstallCommand downloads the version-pinned RKE2 installer script,
-// checks that it matches the pinned SHA256, and only then executes it.
-func buildRKE2InstallCommand(nodeType string) (string, error) {
+func getRKE2InstallScriptURL() (string, string, error) {
 	rke2Version := viper.GetString("k8s.version")
 	expectedInstallerSHA256 := viper.GetString("rke2.install_script_sha256")
 	if rke2Version == "" {
-		return "", fmt.Errorf("k8s.version must be set")
+		return "", "", fmt.Errorf("k8s.version must be set")
 	}
 	if expectedInstallerSHA256 == "" {
-		return "", fmt.Errorf("rke2.install_script_sha256 must be set")
+		return "", "", fmt.Errorf("rke2.install_script_sha256 must be set")
 	}
 
 	installScriptURL := fmt.Sprintf("https://raw.githubusercontent.com/rancher/rke2/%s/install.sh", rke2Version)
+	return installScriptURL, expectedInstallerSHA256, nil
+}
+
+func validatePinnedRKE2InstallerChecksum() error {
+	installScriptURL, expectedInstallerSHA256, err := getRKE2InstallScriptURL()
+	if err != nil {
+		return err
+	}
+
+	log.Printf("[preflight] Validating pinned RKE2 installer checksum before provisioning...")
+
+	resp, err := http.Get(installScriptURL)
+	if err != nil {
+		return fmt.Errorf("failed to download installer from %s: %w", installScriptURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected HTTP status %d downloading %s", resp.StatusCode, installScriptURL)
+	}
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, resp.Body); err != nil {
+		return fmt.Errorf("failed to hash installer from %s: %w", installScriptURL, err)
+	}
+
+	actualInstallerSHA256 := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(actualInstallerSHA256, expectedInstallerSHA256) {
+		return fmt.Errorf("installer checksum mismatch for %s: expected %s, got %s", installScriptURL, expectedInstallerSHA256, actualInstallerSHA256)
+	}
+
+	log.Printf("[preflight] RKE2 installer checksum validated successfully")
+	return nil
+}
+
+func isRKE2InstallerChecksumFailure(stdout, stderr string) bool {
+	combinedOutput := stdout + "\n" + stderr
+	return strings.Contains(combinedOutput, "SECURITY ERROR: RKE2 installer checksum validation failed")
+}
+
+// buildRKE2InstallCommand downloads the version-pinned RKE2 installer script,
+// checks that it matches the pinned SHA256, and only then executes it.
+func buildRKE2InstallCommand(nodeType string) (string, error) {
+	installScriptURL, expectedInstallerSHA256, err := getRKE2InstallScriptURL()
+	if err != nil {
+		return "", err
+	}
+	rke2Version := viper.GetString("k8s.version")
 
 	return fmt.Sprintf(`tmp_script="$(mktemp /tmp/rke2-install.XXXXXX.sh)"
 trap 'rm -f "$tmp_script"' EXIT
