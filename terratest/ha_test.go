@@ -389,7 +389,7 @@ func runCommandSSM(cmd string, instanceID string) (string, error) {
 
 	ctx := context.Background()
 
-	log.Printf("[SSM] Sending command to instance %s: %s", instanceID, cmd)
+	log.Printf("[SSM] Sending command to instance %s", instanceID)
 
 	// Send command
 	sendInput := &ssm.SendCommandInput{
@@ -432,9 +432,9 @@ func runCommandSSM(cmd string, instanceID string) (string, error) {
 			output := aws.ToString(getOutput.StandardOutputContent)
 			stderr := aws.ToString(getOutput.StandardErrorContent)
 
-			// Log stderr if present (could be warnings)
+			// Keep a signal that stderr existed without dumping potentially sensitive content.
 			if stderr != "" {
-				log.Printf("[SSM] Command stderr: %s", stderr)
+				log.Printf("[SSM] Command completed with stderr output (%d bytes)", len(stderr))
 			}
 
 			// Trim trailing newlines to match SSH behavior
@@ -448,10 +448,8 @@ func runCommandSSM(cmd string, instanceID string) (string, error) {
 			stderr := aws.ToString(getOutput.StandardErrorContent)
 			stdout := aws.ToString(getOutput.StandardOutputContent)
 			log.Printf("[SSM] Command FAILED with status %s", status)
-			log.Printf("[SSM] stdout: %s", stdout)
-			log.Printf("[SSM] stderr: %s", stderr)
-			return "", fmt.Errorf("command failed with status %s\nstdout: %s\nstderr: %s",
-				status, stdout, stderr)
+			log.Printf("[SSM] Failure output sizes: stdout=%d bytes stderr=%d bytes", len(stdout), len(stderr))
+			return "", fmt.Errorf("command failed with status %s", status)
 
 		case types.CommandInvocationStatusInProgress,
 			types.CommandInvocationStatusPending:
@@ -723,17 +721,7 @@ func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
 			log.Printf("[setupFirstServerNode] FAILED to create registries.yaml: %v", err)
 			return fmt.Errorf("failed to create registries.yaml: %w", err)
 		}
-		log.Printf("[setupFirstServerNode] Docker Hub authentication configured with base64 encoded credentials")
-
-		// Verify registries.yaml was created
-		log.Printf("[setupFirstServerNode] Verifying registries.yaml...")
-		cmd = "sudo cat /etc/rancher/rke2/registries.yaml"
-		output, err = RunCommand(cmd, ip)
-		if err != nil {
-			log.Printf("[setupFirstServerNode] WARNING: Could not read registries.yaml: %v", err)
-		} else {
-			log.Printf("[setupFirstServerNode] Registries.yaml contents:\n%s", output)
-		}
+		log.Printf("[setupFirstServerNode] Docker Hub authentication configured")
 	} else {
 		log.Printf("[setupFirstServerNode] No Docker Hub credentials provided, skipping registries.yaml creation")
 	}
@@ -975,7 +963,7 @@ tls-san:
 			log.Printf("[setupAdditionalServerNode] FAILED to create registries.yaml: %v", err)
 			return fmt.Errorf("failed to create registries.yaml: %w", err)
 		}
-		log.Printf("[setupAdditionalServerNode] Docker Hub authentication configured for %s with base64 encoded credentials", ip)
+		log.Printf("[setupAdditionalServerNode] Docker Hub authentication configured for %s", ip)
 	} else {
 		log.Printf("[setupAdditionalServerNode] No Docker Hub credentials provided, skipping registries.yaml creation for %s", ip)
 	}
