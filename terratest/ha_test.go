@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -58,6 +59,10 @@ func TestHaSetup(t *testing.T) {
 	if len(helmCommands) != totalHAs {
 		t.Fatalf("Number of Helm commands (%d) does not match the number of HA instances (%d). Please ensure you have exactly %d Helm commands in your configuration.",
 			len(helmCommands), totalHAs, totalHAs)
+	}
+
+	if err := validateLocalToolingPreflight(helmCommands); err != nil {
+		t.Fatalf("Local tooling preflight failed before provisioning infrastructure: %v", err)
 	}
 
 	if err := validatePinnedRKE2InstallerChecksum(); err != nil {
@@ -106,6 +111,8 @@ func TestHaSetup(t *testing.T) {
 	if setupErr != nil {
 		t.Fatalf("Error during parallel HA setup: %v", setupErr)
 	}
+
+	logHASummary(totalHAs, outputs)
 }
 
 // setupHAInstance is a helper that returns errors instead of failing immediately
@@ -506,6 +513,80 @@ func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
+func validateLocalToolingPreflight(helmCommands []string) error {
+	log.Printf("[preflight] Validating local tooling before provisioning...")
+
+	requiredCommands := []string{"kubectl", "helm", "terraform"}
+	for _, commandName := range requiredCommands {
+		if _, err := exec.LookPath(commandName); err != nil {
+			return fmt.Errorf("%s is required locally but was not found in PATH", commandName)
+		}
+	}
+
+	log.Printf("[preflight] Running 'helm repo update'...")
+	helmRepoUpdateOutput, err := exec.Command("helm", "repo", "update").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to run 'helm repo update': %w", err)
+	}
+	log.Printf("[preflight] Helm repo update completed (%d bytes)", len(strings.TrimSpace(string(helmRepoUpdateOutput))))
+
+	helmRepoOutput, err := exec.Command("helm", "repo", "list").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to run 'helm repo list': %w", err)
+	}
+
+	missingHelmRepos := findMissingHelmRepos(string(helmRepoOutput), helmCommands)
+	if len(missingHelmRepos) > 0 {
+		return fmt.Errorf("missing required Helm repos locally: %s", strings.Join(missingHelmRepos, ", "))
+	}
+
+	log.Printf("[preflight] Local tooling validated successfully")
+	return nil
+}
+
+func findMissingHelmRepos(helmRepoListOutput string, helmCommands []string) []string {
+	knownRepos := map[string]bool{}
+	for _, line := range strings.Split(helmRepoListOutput, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || strings.EqualFold(fields[0], "NAME") {
+			continue
+		}
+		knownRepos[fields[0]] = true
+	}
+
+	missingRepos := map[string]bool{}
+	for _, helmCommand := range helmCommands {
+		fields := strings.Fields(helmCommand)
+		for _, field := range fields {
+			if !strings.Contains(field, "/") {
+				continue
+			}
+			if strings.HasPrefix(field, "http://") || strings.HasPrefix(field, "https://") {
+				continue
+			}
+			if strings.HasPrefix(field, "--") {
+				continue
+			}
+
+			repoName := strings.SplitN(field, "/", 2)[0]
+			if repoName == "" || repoName == "." {
+				continue
+			}
+			if !knownRepos[repoName] {
+				missingRepos[repoName] = true
+			}
+			break
+		}
+	}
+
+	var missing []string
+	for repoName := range missingRepos {
+		missing = append(missing, repoName)
+	}
+	slices.Sort(missing)
+	return missing
+}
+
 func getRKE2InstallScriptURL() (string, string, error) {
 	rke2Version := viper.GetString("k8s.version")
 	expectedInstallerSHA256 := viper.GetString("rke2.install_script_sha256")
@@ -664,6 +745,14 @@ func getHAOutputs(instanceNum int, outputs map[string]string) TerraformOutputs {
 		Server3PrivateIP: outputs[fmt.Sprintf("%s_server3_private_ip", prefix)],
 		LoadBalancerDNS:  outputs[fmt.Sprintf("%s_aws_lb", prefix)],
 		RancherURL:       outputs[fmt.Sprintf("%s_rancher_url", prefix)],
+	}
+}
+
+func logHASummary(totalHAs int, outputs map[string]string) {
+	log.Printf("HA setup complete. Rancher URLs:")
+	for i := 1; i <= totalHAs; i++ {
+		haOutputs := getHAOutputs(i, outputs)
+		log.Printf("Rancher instance %d -> %s", i, haOutputs.RancherURL)
 	}
 }
 
