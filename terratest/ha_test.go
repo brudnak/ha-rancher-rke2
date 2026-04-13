@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -29,6 +30,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2Types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/pricing"
+	pricingTypes "github.com/aws/aws-sdk-go-v2/service/pricing/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/brudnak/ha-rancher-rke2/terratest/hcl"
@@ -75,6 +78,20 @@ type helmSearchResult struct {
 	Version     string `json:"version"`
 	AppVersion  string `json:"app_version"`
 	Description string `json:"description"`
+}
+
+type cleanupCostEstimate struct {
+	Region              string
+	TotalRuntimeHours   float64
+	InstanceCount       int
+	InstanceType        string
+	VolumeCount         int
+	VolumeType          string
+	VolumeSizeGiB       int32
+	EC2HourlyRateUSD    float64
+	EBSMonthlyRateUSD   float64
+	EstimatedEC2CostUSD float64
+	EstimatedEBSCostUSD float64
 }
 
 func TestHaSetup(t *testing.T) {
@@ -321,12 +338,21 @@ func TestHACleanup(t *testing.T) {
 	}
 
 	terraformOptions := getTerraformOptions(t, totalHAs)
+	outputs := getTerraformOutputs(t, terraformOptions)
+	costEstimate, estimateErr := estimateCurrentRunCost(totalHAs, outputs)
+	if estimateErr != nil {
+		log.Printf("[cleanup] Could not estimate EC2/EBS cost before destroy: %v", estimateErr)
+	}
 	terraform.Destroy(t, terraformOptions)
 
 	for i := 1; i <= totalHAs; i++ {
 		cleanupHAInstance(i)
 	}
 	cleanupTerraformFiles()
+
+	if costEstimate != nil {
+		logCleanupCostEstimate(costEstimate)
+	}
 }
 
 // Global AWS clients (initialized once)
@@ -1583,8 +1609,12 @@ func getTerraformOutputs(t *testing.T, terraformOptions *terraform.Options) map[
 
 	var outputs map[string]string
 	if err := json.Unmarshal([]byte(output), &outputs); err != nil {
-		t.Logf("Raw output: %s", output)
-		t.Fatalf("Failed to parse terraform outputs: %v", err)
+		if t != nil {
+			t.Logf("Raw output: %s", output)
+			t.Fatalf("Failed to parse terraform outputs: %v", err)
+		}
+		log.Printf("Raw output: %s", output)
+		return nil
 	}
 
 	return outputs
@@ -1610,6 +1640,284 @@ func logHASummary(totalHAs int, outputs map[string]string) {
 		haOutputs := getHAOutputs(i, outputs)
 		log.Printf("Rancher instance %d -> %s", i, haOutputs.RancherURL)
 	}
+}
+
+func estimateCurrentRunCost(totalHAs int, outputs map[string]string) (*cleanupCostEstimate, error) {
+	instanceIDs := make([]string, 0, totalHAs*3)
+	seenIPs := map[string]bool{}
+
+	for i := 1; i <= totalHAs; i++ {
+		haOutputs := getHAOutputs(i, outputs)
+		for _, ip := range []string{haOutputs.Server1IP, haOutputs.Server2IP, haOutputs.Server3IP} {
+			if ip == "" || seenIPs[ip] {
+				continue
+			}
+			seenIPs[ip] = true
+
+			instanceID, err := getInstanceIDFromIP(ip)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve instance ID for %s: %w", ip, err)
+			}
+			instanceIDs = append(instanceIDs, instanceID)
+		}
+	}
+
+	if len(instanceIDs) == 0 {
+		return nil, fmt.Errorf("no running instances found for cost estimate")
+	}
+
+	region := viper.GetString("tf_vars.aws_region")
+	if region == "" {
+		region = "us-east-2"
+	}
+
+	estimate, err := buildCleanupCostEstimate(region, instanceIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	return estimate, nil
+}
+
+func buildCleanupCostEstimate(region string, instanceIDs []string) (*cleanupCostEstimate, error) {
+	if err := initAWSClients(); err != nil {
+		return nil, err
+	}
+
+	ctx := context.Background()
+	describeOutput, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		InstanceIds: instanceIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe instances for cleanup estimate: %w", err)
+	}
+
+	var instances []ec2Types.Instance
+	for _, reservation := range describeOutput.Reservations {
+		instances = append(instances, reservation.Instances...)
+	}
+	if len(instances) == 0 {
+		return nil, fmt.Errorf("no instance details returned for cleanup estimate")
+	}
+
+	instanceType := string(instances[0].InstanceType)
+	now := time.Now()
+	totalRuntimeHours := 0.0
+	volumeIDs := make([]string, 0, len(instances))
+	seenVolumes := map[string]bool{}
+
+	for _, instance := range instances {
+		if string(instance.InstanceType) != instanceType {
+			return nil, fmt.Errorf("mixed instance types are not yet supported in cleanup estimate")
+		}
+		if instance.LaunchTime != nil {
+			totalRuntimeHours += now.Sub(*instance.LaunchTime).Hours()
+		}
+		for _, mapping := range instance.BlockDeviceMappings {
+			if mapping.Ebs == nil || mapping.Ebs.VolumeId == nil {
+				continue
+			}
+			volumeID := aws.ToString(mapping.Ebs.VolumeId)
+			if volumeID == "" || seenVolumes[volumeID] {
+				continue
+			}
+			seenVolumes[volumeID] = true
+			volumeIDs = append(volumeIDs, volumeID)
+		}
+	}
+
+	volumesOutput, err := ec2Client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
+		VolumeIds: volumeIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe volumes for cleanup estimate: %w", err)
+	}
+	if len(volumesOutput.Volumes) == 0 {
+		return nil, fmt.Errorf("no volume details returned for cleanup estimate")
+	}
+
+	volumeType := string(volumesOutput.Volumes[0].VolumeType)
+	volumeSizeGiB := aws.ToInt32(volumesOutput.Volumes[0].Size)
+	for _, volume := range volumesOutput.Volumes {
+		if string(volume.VolumeType) != volumeType {
+			return nil, fmt.Errorf("mixed EBS volume types are not yet supported in cleanup estimate")
+		}
+		if aws.ToInt32(volume.Size) != volumeSizeGiB {
+			return nil, fmt.Errorf("mixed EBS volume sizes are not yet supported in cleanup estimate")
+		}
+	}
+
+	ec2HourlyRateUSD, err := lookupEC2OnDemandHourlyPriceUSD(region, instanceType)
+	if err != nil {
+		return nil, err
+	}
+
+	ebsMonthlyRateUSD, err := lookupEBSMonthlyPricePerGiBUSD(region, volumeType)
+	if err != nil {
+		return nil, err
+	}
+
+	estimatedEC2CostUSD := ec2HourlyRateUSD * totalRuntimeHours
+	estimatedEBSCostUSD := ebsMonthlyRateUSD * float64(volumeSizeGiB*int32(len(volumesOutput.Volumes))) * (totalRuntimeHours / 730.0)
+
+	return &cleanupCostEstimate{
+		Region:              region,
+		TotalRuntimeHours:   totalRuntimeHours,
+		InstanceCount:       len(instances),
+		InstanceType:        instanceType,
+		VolumeCount:         len(volumesOutput.Volumes),
+		VolumeType:          volumeType,
+		VolumeSizeGiB:       volumeSizeGiB,
+		EC2HourlyRateUSD:    ec2HourlyRateUSD,
+		EBSMonthlyRateUSD:   ebsMonthlyRateUSD,
+		EstimatedEC2CostUSD: estimatedEC2CostUSD,
+		EstimatedEBSCostUSD: estimatedEBSCostUSD,
+	}, nil
+}
+
+func lookupEC2OnDemandHourlyPriceUSD(region, instanceType string) (float64, error) {
+	cfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(
+				os.Getenv("AWS_ACCESS_KEY_ID"),
+				os.Getenv("AWS_SECRET_ACCESS_KEY"),
+				"",
+			),
+		),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load AWS pricing config: %w", err)
+	}
+
+	pricingClient := pricing.NewFromConfig(cfg)
+	location, err := awsPricingLocation(region)
+	if err != nil {
+		return 0, err
+	}
+
+	output, err := pricingClient.GetProducts(context.Background(), &pricing.GetProductsInput{
+		ServiceCode: aws.String("AmazonEC2"),
+		MaxResults:  aws.Int32(100),
+		Filters: []pricingTypes.Filter{
+			{Type: pricingTypes.FilterTypeTermMatch, Field: aws.String("location"), Value: aws.String(location)},
+			{Type: pricingTypes.FilterTypeTermMatch, Field: aws.String("instanceType"), Value: aws.String(instanceType)},
+			{Type: pricingTypes.FilterTypeTermMatch, Field: aws.String("operatingSystem"), Value: aws.String("Linux")},
+			{Type: pricingTypes.FilterTypeTermMatch, Field: aws.String("tenancy"), Value: aws.String("Shared")},
+			{Type: pricingTypes.FilterTypeTermMatch, Field: aws.String("preInstalledSw"), Value: aws.String("NA")},
+			{Type: pricingTypes.FilterTypeTermMatch, Field: aws.String("capacitystatus"), Value: aws.String("Used")},
+		},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to query EC2 pricing: %w", err)
+	}
+
+	return extractUSDPriceFromPricingResult(output.PriceList)
+}
+
+func lookupEBSMonthlyPricePerGiBUSD(region, volumeType string) (float64, error) {
+	cfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(
+				os.Getenv("AWS_ACCESS_KEY_ID"),
+				os.Getenv("AWS_SECRET_ACCESS_KEY"),
+				"",
+			),
+		),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load AWS pricing config: %w", err)
+	}
+
+	pricingClient := pricing.NewFromConfig(cfg)
+	location, err := awsPricingLocation(region)
+	if err != nil {
+		return 0, err
+	}
+
+	output, err := pricingClient.GetProducts(context.Background(), &pricing.GetProductsInput{
+		ServiceCode: aws.String("AmazonEC2"),
+		MaxResults:  aws.Int32(100),
+		Filters: []pricingTypes.Filter{
+			{Type: pricingTypes.FilterTypeTermMatch, Field: aws.String("location"), Value: aws.String(location)},
+			{Type: pricingTypes.FilterTypeTermMatch, Field: aws.String("productFamily"), Value: aws.String("Storage")},
+			{Type: pricingTypes.FilterTypeTermMatch, Field: aws.String("volumeApiName"), Value: aws.String(volumeType)},
+		},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to query EBS pricing: %w", err)
+	}
+
+	return extractUSDPriceFromPricingResult(output.PriceList)
+}
+
+func extractUSDPriceFromPricingResult(priceList []string) (float64, error) {
+	type pricingDocument struct {
+		Terms struct {
+			OnDemand map[string]struct {
+				PriceDimensions map[string]struct {
+					PricePerUnit map[string]string `json:"pricePerUnit"`
+				} `json:"priceDimensions"`
+			} `json:"OnDemand"`
+		} `json:"terms"`
+	}
+
+	bestPrice := math.MaxFloat64
+	for _, item := range priceList {
+		var doc pricingDocument
+		if err := json.Unmarshal([]byte(item), &doc); err != nil {
+			continue
+		}
+
+		for _, offer := range doc.Terms.OnDemand {
+			for _, dimension := range offer.PriceDimensions {
+				usdValue := strings.TrimSpace(dimension.PricePerUnit["USD"])
+				if usdValue == "" {
+					continue
+				}
+				var price float64
+				if _, err := fmt.Sscanf(usdValue, "%f", &price); err != nil {
+					continue
+				}
+				if price > 0 && price < bestPrice {
+					bestPrice = price
+				}
+			}
+		}
+	}
+
+	if bestPrice == math.MaxFloat64 {
+		return 0, fmt.Errorf("no USD price found in pricing response")
+	}
+
+	return bestPrice, nil
+}
+
+func awsPricingLocation(region string) (string, error) {
+	locations := map[string]string{
+		"us-east-1": "US East (N. Virginia)",
+		"us-east-2": "US East (Ohio)",
+		"us-west-1": "US West (N. California)",
+		"us-west-2": "US West (Oregon)",
+	}
+	location := locations[region]
+	if location == "" {
+		return "", fmt.Errorf("no AWS pricing location mapping configured for region %s", region)
+	}
+	return location, nil
+}
+
+func logCleanupCostEstimate(estimate *cleanupCostEstimate) {
+	totalEstimatedUSD := estimate.EstimatedEC2CostUSD + estimate.EstimatedEBSCostUSD
+	log.Printf("[cleanup] Estimated AWS cost for this run (EC2 + EBS only, live pricing):")
+	log.Printf("[cleanup] Region: %s", estimate.Region)
+	log.Printf("[cleanup] Total runtime across instances: %.2f hours", estimate.TotalRuntimeHours)
+	log.Printf("[cleanup] EC2: %d x %s at $%.4f/hour -> $%.2f estimated",
+		estimate.InstanceCount, estimate.InstanceType, estimate.EC2HourlyRateUSD, estimate.EstimatedEC2CostUSD)
+	log.Printf("[cleanup] EBS: %d x %d GiB %s at $%.4f/GiB-month -> $%.2f estimated",
+		estimate.VolumeCount, estimate.VolumeSizeGiB, estimate.VolumeType, estimate.EBSMonthlyRateUSD, estimate.EstimatedEBSCostUSD)
+	log.Printf("[cleanup] Estimated total (EC2 + EBS only): $%.2f", totalEstimatedUSD)
 }
 
 func setupFirstServerNode(ip string, haOutputs TerraformOutputs, resolvedPlan *RancherResolvedPlan) error {
