@@ -286,6 +286,19 @@ You will get output like:
 bfbd978d603b7070f5748c934326db509bf1470c97d3f61a3aaa6e2eed6bd054  /tmp/rke2-install.sh
 ```
 
+Copy only the hash on the left and put it into `tool-config.yml`:
+
+```yaml
+k8s:
+  version: "v1.33.7+rke2r1"
+
+rke2:
+  install_script_sha256: "bfbd978d603b7070f5748c934326db509bf1470c97d3f61a3aaa6e2eed6bd054"
+  preload_images: true
+```
+
+If the downloaded installer does not match the pinned hash, the setup stops immediately and refuses to run it.
+
 ## Cleanup Cost Estimate
 
 `TestHACleanup` now prints a best-effort AWS cost estimate after destroy for:
@@ -309,19 +322,6 @@ It does **not** include everything AWS might charge for, such as:
 - request-driven costs
 
 So the number is meant to be helpful and roughly right for the main infrastructure cost drivers, not a final billing total.
-
-Copy only the hash on the left and put it into `tool-config.yml`:
-
-```yaml
-k8s:
-  version: "v1.33.7+rke2r1"
-
-rke2:
-  install_script_sha256: "bfbd978d603b7070f5748c934326db509bf1470c97d3f61a3aaa6e2eed6bd054"
-  preload_images: true
-```
-
-If the downloaded installer does not match the pinned hash, the setup stops immediately and refuses to run it.
 
 ## Output Example
 
