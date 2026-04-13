@@ -286,6 +286,30 @@ You will get output like:
 bfbd978d603b7070f5748c934326db509bf1470c97d3f61a3aaa6e2eed6bd054  /tmp/rke2-install.sh
 ```
 
+## Cleanup Cost Estimate
+
+`TestHACleanup` now prints a best-effort AWS cost estimate after destroy for:
+
+- EC2 runtime
+- EBS root volumes
+
+This is only an estimate, not an AWS bill.
+
+The estimate uses:
+
+- live AWS pricing data for EC2 and EBS unit prices
+- actual EC2 instance launch times from AWS to estimate runtime
+- actual attached root EBS volumes from AWS to estimate storage cost
+
+It does **not** include everything AWS might charge for, such as:
+
+- ALB usage
+- Route53 charges
+- data transfer
+- request-driven costs
+
+So the number is meant to be helpful and roughly right for the main infrastructure cost drivers, not a final billing total.
+
 Copy only the hash on the left and put it into `tool-config.yml`:
 
 ```yaml
