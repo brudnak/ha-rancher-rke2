@@ -1,6 +1,7 @@
 package test
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -15,6 +16,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -30,9 +33,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/brudnak/ha-rancher-rke2/terratest/hcl"
 
+	goversion "github.com/hashicorp/go-version"
 	"github.com/gruntwork-io/terratest/modules/terraform"
 
 	"github.com/spf13/viper"
+	"golang.org/x/net/html"
 )
 
 type TerraformOutputs struct {
@@ -46,12 +51,43 @@ type TerraformOutputs struct {
 	RancherURL       string
 }
 
+type RancherResolvedPlan struct {
+	Mode                   string
+	RequestedVersion       string
+	RequestedDistro        string
+	BuildType              string
+	ResolvedDistro         string
+	ChartRepoAlias         string
+	ChartVersion           string
+	RancherImage           string
+	RancherImageTag        string
+	AgentImage             string
+	CompatibilityBaseline  string
+	SupportMatrixURL       string
+	RecommendedRKE2Version string
+	InstallerSHA256        string
+	HelmCommands           []string
+	Explanation            []string
+}
+
+type helmSearchResult struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	AppVersion  string `json:"app_version"`
+	Description string `json:"description"`
+}
+
 func TestHaSetup(t *testing.T) {
 	setupConfig(t)
 
 	totalHAs := viper.GetInt("total_has")
 	if totalHAs < 1 {
 		t.Fatal("total_has must be at least 1")
+	}
+
+	resolvedPlans, err := prepareRancherConfiguration(totalHAs)
+	if err != nil {
+		t.Fatalf("Failed to prepare Rancher configuration: %v", err)
 	}
 
 	// Validate that the number of Helm commands matches the number of HA instances
@@ -65,8 +101,16 @@ func TestHaSetup(t *testing.T) {
 		t.Fatalf("Local tooling preflight failed before provisioning infrastructure: %v", err)
 	}
 
-	if err := validatePinnedRKE2InstallerChecksum(); err != nil {
+	if err := validateSecretEnvironment(); err != nil {
+		t.Fatalf("Secret environment preflight failed before provisioning infrastructure: %v", err)
+	}
+
+	if err := validatePinnedRKE2InstallerChecksum(resolvedPlans); err != nil {
 		t.Fatalf("RKE2 installer checksum preflight failed before provisioning infrastructure: %v", err)
+	}
+
+	if err := confirmResolvedPlans(resolvedPlans); err != nil {
+		t.Fatalf("Canceled before provisioning infrastructure: %v", err)
 	}
 
 	terraformOptions := getTerraformOptions(t, totalHAs)
@@ -94,7 +138,11 @@ func TestHaSetup(t *testing.T) {
 			// Create a subtest instead of a custom wrapper
 			t.Run(fmt.Sprintf("HA%d", instanceNum), func(subT *testing.T) {
 				// We'll use a helper function that captures failures
-				if err := setupHAInstance(subT, instanceNum, outputs); err != nil {
+				var resolvedPlan *RancherResolvedPlan
+				if len(resolvedPlans) >= instanceNum {
+					resolvedPlan = resolvedPlans[instanceNum-1]
+				}
+				if err := setupHAInstance(subT, instanceNum, outputs, resolvedPlan); err != nil {
 					setupErrMutex.Lock()
 					setupErr = fmt.Errorf("HA instance %d setup failed: %s", instanceNum, err.Error())
 					setupErrMutex.Unlock()
@@ -116,7 +164,7 @@ func TestHaSetup(t *testing.T) {
 }
 
 // setupHAInstance is a helper that returns errors instead of failing immediately
-func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) error {
+func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string, resolvedPlan *RancherResolvedPlan) error {
 	haDir := fmt.Sprintf("high-availability-%d", instanceNum)
 
 	haOutputs := getHAOutputs(instanceNum, outputs)
@@ -172,7 +220,7 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 
 	// Setup first server node
 	log.Printf("Setting up first server node with IP %s", haOutputs.Server1IP)
-	err = setupFirstServerNode(haOutputs.Server1IP, haOutputs)
+	err = setupFirstServerNode(haOutputs.Server1IP, haOutputs, resolvedPlan)
 	if err != nil {
 		return fmt.Errorf("failed to setup first server node: %w", err)
 	}
@@ -195,7 +243,7 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 			defer wg.Done()
 
 			log.Printf("Setting up server node %d with IP %s", nodeNum, ip)
-			err := setupAdditionalServerNode(ip, token, haOutputs)
+			err := setupAdditionalServerNode(ip, token, haOutputs, resolvedPlan)
 			if err != nil {
 				setupErrMutex.Lock()
 				setupErr = fmt.Errorf("failed to setup server node %d: %w", nodeNum, err)
@@ -268,6 +316,9 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string) e
 func TestHACleanup(t *testing.T) {
 	setupConfig(t)
 	totalHAs := viper.GetInt("total_has")
+	if err := validateSecretEnvironment(); err != nil {
+		t.Fatalf("Secret environment preflight failed before cleanup: %v", err)
+	}
 
 	terraformOptions := getTerraformOptions(t, totalHAs)
 	terraform.Destroy(t, terraformOptions)
@@ -305,8 +356,8 @@ func initAWSClients() error {
 		config.WithRegion(region),
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
-				viper.GetString("tf_vars.aws_access_key"),
-				viper.GetString("tf_vars.aws_secret_key"),
+				os.Getenv("AWS_ACCESS_KEY_ID"),
+				os.Getenv("AWS_SECRET_ACCESS_KEY"),
 				"", // session token (empty for non-temporary credentials)
 			),
 		),
@@ -513,6 +564,697 @@ func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
+func prepareRancherConfiguration(totalHAs int) ([]*RancherResolvedPlan, error) {
+	mode := strings.ToLower(strings.TrimSpace(viper.GetString("rancher.mode")))
+	switch mode {
+	case "", "manual":
+		return prepareManualRKE2Plans(totalHAs)
+	case "auto":
+		plans, err := resolveAutoRancherPlans(totalHAs)
+		if err != nil {
+			return nil, err
+		}
+
+		var helmCommands []string
+		for _, plan := range plans {
+			helmCommands = append(helmCommands, plan.HelmCommands...)
+		}
+		viper.Set("rancher.helm_commands", helmCommands)
+		return plans, nil
+	default:
+		return nil, fmt.Errorf("unsupported rancher.mode %q", mode)
+	}
+}
+
+func confirmResolvedPlans(plans []*RancherResolvedPlan) error {
+	if len(plans) == 0 {
+		return nil
+	}
+	if plans[0] != nil && plans[0].Mode == "manual" {
+		return nil
+	}
+
+	logResolvedPlans(plans)
+
+	if viper.GetBool("rancher.auto_approve") {
+		log.Printf("[resolver] Auto-approve enabled, continuing without prompt")
+		return nil
+	}
+
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err == nil {
+		defer tty.Close()
+
+		if _, err := fmt.Fprint(tty, "Continue with this Rancher plan? [y/N]: "); err != nil {
+			return fmt.Errorf("failed to write confirmation prompt: %w", err)
+		}
+
+		reader := bufio.NewReader(tty)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("failed to read confirmation response from terminal: %w", err)
+		}
+
+		switch strings.ToLower(strings.TrimSpace(response)) {
+		case "y", "yes", "continue":
+			log.Printf("[resolver] User approved resolved Rancher plans")
+			return nil
+		default:
+			return fmt.Errorf("user canceled resolved Rancher plans")
+		}
+	}
+
+	stdinInfo, err := os.Stdin.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to inspect stdin for confirmation prompt: %w", err)
+	}
+	if stdinInfo.Mode()&os.ModeCharDevice == 0 {
+		approved, err := confirmResolvedPlansWithOSDialog()
+		if err == nil {
+			if approved {
+				log.Printf("[resolver] User approved resolved Rancher plans")
+				return nil
+			}
+			return fmt.Errorf("user canceled resolved Rancher plans")
+		}
+		return fmt.Errorf("confirmation prompt requires an interactive terminal; set rancher.auto_approve=true to skip it")
+	}
+
+	fmt.Print("Continue with this Rancher plan? [y/N]: ")
+	reader := bufio.NewReader(os.Stdin)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		approved, dialogErr := confirmResolvedPlansWithOSDialog()
+		if dialogErr == nil {
+			if approved {
+				log.Printf("[resolver] User approved resolved Rancher plans")
+				return nil
+			}
+			return fmt.Errorf("user canceled resolved Rancher plans")
+		}
+		return fmt.Errorf("failed to read confirmation response: %w", err)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(response)) {
+	case "y", "yes", "continue":
+		log.Printf("[resolver] User approved resolved Rancher plans")
+		return nil
+	default:
+		return fmt.Errorf("user canceled resolved Rancher plans")
+	}
+}
+
+func confirmResolvedPlansWithOSDialog() (bool, error) {
+	if runtime.GOOS != "darwin" {
+		return false, fmt.Errorf("OS dialog confirmation is only supported on macOS")
+	}
+
+	script := `button returned of (display dialog "Continue with this Rancher plan?" buttons {"Cancel", "Continue"} default button "Continue" cancel button "Cancel" with title "Rancher Plan Confirmation")`
+	output, err := exec.Command("osascript", "-e", script).CombinedOutput()
+	if err != nil {
+		return false, err
+	}
+
+	return strings.Contains(string(output), "Continue"), nil
+}
+
+func prepareManualRKE2Plans(totalHAs int) ([]*RancherResolvedPlan, error) {
+	versions, err := getRequestedRKE2Versions(totalHAs)
+	if err != nil {
+		return nil, err
+	}
+
+	plans := make([]*RancherResolvedPlan, 0, len(versions))
+	for _, version := range versions {
+		checksum, err := rke2ChecksumForVersion(version)
+		if err != nil {
+			return nil, err
+		}
+
+		plans = append(plans, &RancherResolvedPlan{
+			Mode:                   "manual",
+			RecommendedRKE2Version: version,
+			InstallerSHA256:        checksum,
+		})
+	}
+
+	return plans, nil
+}
+
+func logResolvedPlans(plans []*RancherResolvedPlan) {
+	for i, plan := range plans {
+		log.Printf("[resolver] Rancher resolution summary for HA %d:", i+1)
+		log.Printf("[resolver] Requested version: %s", plan.RequestedVersion)
+		log.Printf("[resolver] Requested distro: %s", plan.RequestedDistro)
+		log.Printf("[resolver] Build type: %s", plan.BuildType)
+		log.Printf("[resolver] Resolved distro: %s", plan.ResolvedDistro)
+		log.Printf("[resolver] Chart repo: %s", plan.ChartRepoAlias)
+		log.Printf("[resolver] Chart version: %s", plan.ChartVersion)
+		log.Printf("[resolver] Rancher image: %s", plan.RancherImage)
+		if plan.RancherImageTag != "" {
+			log.Printf("[resolver] Rancher image tag: %s", plan.RancherImageTag)
+		}
+		if plan.AgentImage != "" {
+			log.Printf("[resolver] Rancher agent image: %s", plan.AgentImage)
+		}
+		log.Printf("[resolver] Compatibility baseline: %s", plan.CompatibilityBaseline)
+		log.Printf("[resolver] Support matrix: %s", plan.SupportMatrixURL)
+		log.Printf("[resolver] Recommended RKE2 version: %s", plan.RecommendedRKE2Version)
+		log.Printf("[resolver] Resolved installer SHA256: %s", plan.InstallerSHA256)
+		for _, explanation := range plan.Explanation {
+			log.Printf("[resolver] Reason: %s", explanation)
+		}
+		for commandIndex, helmCommand := range plan.HelmCommands {
+			log.Printf("[resolver] Generated Helm command for HA %d.%d:\n%s", i+1, commandIndex+1, sanitizeHelmCommandForLog(helmCommand))
+		}
+	}
+}
+
+func sanitizeHelmCommandForLog(command string) string {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`bootstrapPassword=[^\s\\]+`),
+		regexp.MustCompile(`dockerhub\.password=[^\s\\]+`),
+	}
+
+	sanitized := command
+	for _, pattern := range patterns {
+		sanitized = pattern.ReplaceAllStringFunc(sanitized, func(match string) string {
+			parts := strings.SplitN(match, "=", 2)
+			if len(parts) != 2 {
+				return match
+			}
+			return parts[0] + "=<redacted>"
+		})
+	}
+	return sanitized
+}
+
+func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
+	requestedVersions, err := getRequestedRancherVersions(totalHAs)
+	if err != nil {
+		return nil, err
+	}
+
+	requestedDistro := strings.ToLower(strings.TrimSpace(viper.GetString("rancher.distro")))
+	if requestedDistro == "" {
+		requestedDistro = "auto"
+	}
+
+	bootstrapPassword := viper.GetString("rancher.bootstrap_password")
+	if bootstrapPassword == "" {
+		return nil, fmt.Errorf("rancher.bootstrap_password must be set when rancher.mode=auto")
+	}
+
+	plans := make([]*RancherResolvedPlan, 0, len(requestedVersions))
+	for _, requestedVersion := range requestedVersions {
+		buildType, minorLine, err := classifyRancherVersion(requestedVersion)
+		if err != nil {
+			return nil, err
+		}
+		if requestedDistro == "prime" && buildType != "release" {
+			return nil, fmt.Errorf("prime distro requires a released Rancher version like 2.13.4")
+		}
+
+		repoCandidates, resolvedDistro, explanation := chooseRancherSourceCandidates(requestedDistro, buildType)
+		chartRepoAlias, chartVersion, compatibilityBaseline, err := resolveChartAndBaseline(repoCandidates, requestedVersion, minorLine, buildType)
+		if err != nil {
+			return nil, err
+		}
+		if buildType != "release" && chartRepoAlias == "rancher-prime" {
+			explanation = append(explanation, fmt.Sprintf("Using the latest released Prime chart %s as the baseline chart, then overriding Rancher images to the requested %s build", chartVersion, buildType))
+		}
+
+		rancherImage, rancherImageTag, agentImage, imageExplanation := resolveImageSettings(requestedVersion, buildType, resolvedDistro)
+		if buildType != "release" && chartRepoAlias == "rancher-latest" {
+			rancherImage = ""
+			agentImage = ""
+			explanation = append(explanation, fmt.Sprintf("Using rancher-latest for this %s build, so only the Rancher image tag is overridden to %s", buildType, rancherImageTag))
+		}
+		if buildType == "release" && chartRepoAlias == "rancher-prime" {
+			rancherImage = "registry.rancher.com/rancher/rancher"
+			explanation = append(explanation, fmt.Sprintf("Using Prime chart and Prime Rancher image for released version %s", requestedVersion))
+		}
+		explanation = append(explanation, imageExplanation...)
+		if compatibilityBaseline != requestedVersion {
+			explanation = append(explanation, fmt.Sprintf("Using %s as the latest released compatibility baseline for the %s release line", compatibilityBaseline, minorLine))
+		}
+
+		supportMatrixURL := buildSupportMatrixURL(compatibilityBaseline)
+		highestRKE2Minor, supportExplanation, err := resolveHighestSupportedRKE2Minor(supportMatrixURL)
+		if err != nil {
+			return nil, err
+		}
+		explanation = append(explanation, supportExplanation)
+
+		recommendedRKE2Version, err := resolveLatestRKE2Patch(highestRKE2Minor)
+		if err != nil {
+			return nil, err
+		}
+		explanation = append(explanation, fmt.Sprintf("Selected %s as the latest available RKE2 patch in the supported v1.%d line", recommendedRKE2Version, highestRKE2Minor))
+
+		installerSHA256, err := resolveInstallerSHA256(recommendedRKE2Version)
+		if err != nil {
+			return nil, err
+		}
+
+		helmCommands := buildAutoHelmCommands(1, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage)
+
+		plans = append(plans, &RancherResolvedPlan{
+			Mode:                   "auto",
+			RequestedVersion:       requestedVersion,
+			RequestedDistro:        requestedDistro,
+			BuildType:              buildType,
+			ResolvedDistro:         resolvedDistro,
+			ChartRepoAlias:         chartRepoAlias,
+			ChartVersion:           chartVersion,
+			RancherImage:           rancherImage,
+			RancherImageTag:        rancherImageTag,
+			AgentImage:             agentImage,
+			CompatibilityBaseline:  compatibilityBaseline,
+			SupportMatrixURL:       supportMatrixURL,
+			RecommendedRKE2Version: recommendedRKE2Version,
+			InstallerSHA256:        installerSHA256,
+			HelmCommands:           helmCommands,
+			Explanation:            explanation,
+		})
+	}
+
+	return plans, nil
+}
+
+func getRequestedRancherVersions(totalHAs int) ([]string, error) {
+	requestedVersions := viper.GetStringSlice("rancher.versions")
+	if len(requestedVersions) > 0 {
+		if len(requestedVersions) != totalHAs {
+			return nil, fmt.Errorf("rancher.versions has %d entries but total_has is %d; please provide exactly one Rancher version per HA", len(requestedVersions), totalHAs)
+		}
+
+		normalized := make([]string, 0, len(requestedVersions))
+		for i, version := range requestedVersions {
+			normalizedVersion := normalizeVersionInput(version)
+			if normalizedVersion == "" {
+				return nil, fmt.Errorf("rancher.versions[%d] must not be empty", i)
+			}
+			normalized = append(normalized, normalizedVersion)
+		}
+		return normalized, nil
+	}
+
+	requestedVersion := normalizeVersionInput(viper.GetString("rancher.version"))
+	if requestedVersion == "" {
+		return nil, fmt.Errorf("set rancher.version for a single HA or rancher.versions with %d entries for auto mode", totalHAs)
+	}
+	if totalHAs > 1 {
+		return nil, fmt.Errorf("total_has is %d, so rancher.versions must contain %d versions", totalHAs, totalHAs)
+	}
+
+	return []string{requestedVersion}, nil
+}
+
+func getRequestedRKE2Versions(totalHAs int) ([]string, error) {
+	requestedVersions := viper.GetStringSlice("k8s.versions")
+	if len(requestedVersions) > 0 {
+		if len(requestedVersions) != totalHAs {
+			return nil, fmt.Errorf("k8s.versions has %d entries but total_has is %d; please provide exactly one RKE2 version per HA", len(requestedVersions), totalHAs)
+		}
+
+		normalized := make([]string, 0, len(requestedVersions))
+		for i, version := range requestedVersions {
+			normalizedVersion := strings.TrimSpace(version)
+			if normalizedVersion == "" {
+				return nil, fmt.Errorf("k8s.versions[%d] must not be empty", i)
+			}
+			normalized = append(normalized, normalizedVersion)
+		}
+		return normalized, nil
+	}
+
+	requestedVersion := strings.TrimSpace(viper.GetString("k8s.version"))
+	if requestedVersion == "" {
+		return nil, fmt.Errorf("set k8s.version for a single HA or k8s.versions with %d entries", totalHAs)
+	}
+	if totalHAs > 1 {
+		return nil, fmt.Errorf("total_has is %d, so k8s.versions must contain %d versions in manual mode", totalHAs, totalHAs)
+	}
+
+	return []string{requestedVersion}, nil
+}
+
+func rke2ChecksumForVersion(version string) (string, error) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return "", fmt.Errorf("RKE2 version must not be empty")
+	}
+
+	checksums := viper.GetStringMapString("rke2.install_script_sha256s")
+	if checksum := strings.TrimSpace(checksums[version]); checksum != "" {
+		return checksum, nil
+	}
+
+	if strings.TrimSpace(viper.GetString("k8s.version")) == version {
+		if checksum := strings.TrimSpace(viper.GetString("rke2.install_script_sha256")); checksum != "" {
+			return checksum, nil
+		}
+	}
+
+	return "", fmt.Errorf("rke2.install_script_sha256s.%s must be set", version)
+}
+
+func normalizeVersionInput(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "v")
+	return value
+}
+
+func classifyRancherVersion(version string) (buildType string, minorLine string, err error) {
+	headPattern := regexp.MustCompile(`^\d+\.\d+-head$`)
+	alphaPattern := regexp.MustCompile(`^\d+\.\d+\.\d+-alpha\d+$`)
+	rcPattern := regexp.MustCompile(`^\d+\.\d+\.\d+-rc\d+$`)
+	releasePattern := regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
+	switch {
+	case headPattern.MatchString(version):
+		parts := strings.Split(version, "-")
+		return "head", parts[0], nil
+	case alphaPattern.MatchString(version):
+		parts := strings.Split(version, "-")
+		return "alpha", strings.Join(strings.Split(parts[0], ".")[:2], "."), nil
+	case rcPattern.MatchString(version):
+		parts := strings.Split(version, "-")
+		return "rc", strings.Join(strings.Split(parts[0], ".")[:2], "."), nil
+	case releasePattern.MatchString(version):
+		return "release", strings.Join(strings.Split(version, ".")[:2], "."), nil
+	default:
+		return "", "", fmt.Errorf("unsupported rancher.version format %q", version)
+	}
+}
+
+func chooseRancherSourceCandidates(requestedDistro, buildType string) ([]string, string, []string) {
+	switch requestedDistro {
+	case "prime":
+		return []string{"rancher-prime"}, "prime", []string{"Prime distro was requested explicitly"}
+	case "community":
+		switch buildType {
+		case "head":
+			return []string{"optimus-rancher-latest"}, "community-staging", []string{"Head build requested, using community staging chart sources"}
+		case "alpha":
+			return []string{"optimus-rancher-alpha", "optimus-rancher-latest", "rancher-alpha", "rancher-latest"}, "community-staging", []string{"Alpha build requested, trying community alpha/staging chart sources first"}
+		case "rc":
+			return []string{"optimus-rancher-latest", "rancher-latest"}, "community-staging", []string{"RC build requested, trying community staging chart sources first"}
+		default:
+			return []string{"rancher-latest", "optimus-rancher-latest"}, "community", []string{"Released community build requested"}
+		}
+	default:
+		switch buildType {
+		case "head":
+			return []string{"rancher-prime", "rancher-latest", "optimus-rancher-latest"}, "community-staging", []string{"Head build requested in auto mode, trying the latest released chart first and then falling back to community staging charts"}
+		case "alpha":
+			return []string{"rancher-prime", "rancher-latest", "optimus-rancher-alpha", "optimus-rancher-latest", "rancher-alpha"}, "community-staging", []string{"Alpha build requested in auto mode, trying the latest released chart first and then community alpha/staging chart sources"}
+		case "rc":
+			return []string{"rancher-prime", "rancher-latest", "optimus-rancher-latest"}, "community-staging", []string{"RC build requested in auto mode, trying the latest released chart first and then community staging chart sources"}
+		default:
+			return []string{"rancher-latest", "rancher-prime"}, "community", []string{"Released build requested in auto mode, trying community release sources first"}
+		}
+	}
+}
+
+func resolveChartAndBaseline(repoCandidates []string, requestedVersion, minorLine, buildType string) (string, string, string, error) {
+	var lastErr error
+	for _, repoAlias := range repoCandidates {
+		results, err := searchHelmRepoVersions(repoAlias)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(results) == 0 {
+			continue
+		}
+
+		switch buildType {
+		case "release":
+			if hasChartVersion(results, requestedVersion) {
+				return repoAlias, requestedVersion, requestedVersion, nil
+			}
+		default:
+			chartVersion, err := findLatestMinorRelease(results, minorLine)
+			if err == nil {
+				compatibilityBaseline, baselineErr := resolveReleasedCompatibilityBaseline(minorLine)
+				if baselineErr != nil {
+					compatibilityBaseline = chartVersion
+				}
+				return repoAlias, chartVersion, compatibilityBaseline, nil
+			}
+			lastErr = err
+		}
+	}
+
+	if lastErr != nil {
+		return "", "", "", lastErr
+	}
+	return "", "", "", fmt.Errorf("could not resolve a Rancher chart version for %s from repos %s", requestedVersion, strings.Join(repoCandidates, ", "))
+}
+
+func resolveReleasedCompatibilityBaseline(minorLine string) (string, error) {
+	releaseRepos := []string{"rancher-latest", "rancher-prime"}
+	var bestVersion *goversion.Version
+
+	for _, repoAlias := range releaseRepos {
+		results, err := searchHelmRepoVersions(repoAlias)
+		if err != nil {
+			continue
+		}
+
+		versionString, err := findLatestMinorRelease(results, minorLine)
+		if err != nil {
+			continue
+		}
+
+		parsed, err := goversion.NewVersion(versionString)
+		if err != nil {
+			continue
+		}
+
+		if bestVersion == nil || parsed.GreaterThan(bestVersion) {
+			bestVersion = parsed
+		}
+	}
+
+	if bestVersion == nil {
+		return "", fmt.Errorf("no released compatibility baseline found for Rancher %s.x", minorLine)
+	}
+
+	return bestVersion.Original(), nil
+}
+
+func searchHelmRepoVersions(repoAlias string) ([]helmSearchResult, error) {
+	chartRef := fmt.Sprintf("%s/rancher", repoAlias)
+	output, err := exec.Command("helm", "search", "repo", chartRef, "--versions", "-o", "json").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query helm repo %s: %w", repoAlias, err)
+	}
+
+	var results []helmSearchResult
+	if err := json.Unmarshal(output, &results); err != nil {
+		return nil, fmt.Errorf("failed to parse helm search results for %s: %w", repoAlias, err)
+	}
+	return results, nil
+}
+
+func hasChartVersion(results []helmSearchResult, version string) bool {
+	for _, result := range results {
+		if result.Version == version {
+			return true
+		}
+	}
+	return false
+}
+
+func findLatestMinorRelease(results []helmSearchResult, minorLine string) (string, error) {
+	var candidates []*goversion.Version
+	for _, result := range results {
+		if !strings.HasPrefix(result.Version, minorLine+".") {
+			continue
+		}
+		if strings.Contains(result.Version, "-") {
+			continue
+		}
+		parsed, err := goversion.NewVersion(result.Version)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, parsed)
+	}
+
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no released chart version found for Rancher %s.x", minorLine)
+	}
+
+	slices.SortFunc(candidates, func(a, b *goversion.Version) int {
+		return b.Compare(a)
+	})
+	return candidates[0].Original(), nil
+}
+
+func resolveImageSettings(requestedVersion, buildType, resolvedDistro string) (string, string, string, []string) {
+	switch resolvedDistro {
+	case "prime":
+		if buildType == "release" {
+			return "registry.rancher.com/rancher/rancher", "", "", []string{"Using Rancher Prime registry because distro=prime was requested explicitly"}
+		}
+		return "registry.rancher.com/rancher/rancher", "v" + requestedVersion, "", []string{"Using Rancher Prime registry because distro=prime was requested explicitly"}
+	case "community-staging":
+		imageTag := "v" + requestedVersion
+		agentImage := fmt.Sprintf("stgregistry.suse.com/rancher/rancher-agent:%s", imageTag)
+		return "stgregistry.suse.com/rancher/rancher", imageTag, agentImage, []string{"Using staging Rancher images because the requested version is not a standard released community build"}
+	default:
+		if buildType == "release" {
+			return "", "", "", []string{"Using released community Rancher chart/image defaults"}
+		}
+		return "", "v" + requestedVersion, "", []string{"Using released community Rancher chart/image settings"}
+	}
+}
+
+func buildSupportMatrixURL(releasedVersion string) string {
+	pathVersion := strings.ReplaceAll(releasedVersion, ".", "-")
+	return fmt.Sprintf("https://www.suse.com/suse-rancher/support-matrix/all-supported-versions/rancher-v%s/", pathVersion)
+}
+
+func resolveHighestSupportedRKE2Minor(supportMatrixURL string) (int, string, error) {
+	body, err := fetchURLBody(supportMatrixURL)
+	if err != nil {
+		return 0, "", err
+	}
+
+	textContent, err := extractTextFromHTML(body)
+	if err != nil {
+		return 0, "", fmt.Errorf("failed to parse support matrix page %s: %w", supportMatrixURL, err)
+	}
+
+	rke2RangePattern := regexp.MustCompile(`RKE2\s+v1\.(\d+)\s+v1\.(\d+)`)
+	matches := rke2RangePattern.FindStringSubmatch(textContent)
+	if len(matches) != 3 {
+		return 0, "", fmt.Errorf("could not find supported RKE2 range in %s", supportMatrixURL)
+	}
+
+	highestMinorVersion, err := goversion.NewVersion(matches[2])
+	if err != nil {
+		return 0, "", fmt.Errorf("failed to parse supported RKE2 minor %q: %w", matches[2], err)
+	}
+
+	majorSegments := strings.Split(highestMinorVersion.Original(), ".")
+	if len(majorSegments) == 0 {
+		return 0, "", fmt.Errorf("unexpected supported RKE2 minor value %q", highestMinorVersion.Original())
+	}
+
+	var highestMinor int
+	fmt.Sscanf(matches[2], "%d", &highestMinor)
+	return highestMinor, fmt.Sprintf("Support matrix certifies RKE2 from v1.%s through v1.%s", matches[1], matches[2]), nil
+}
+
+func resolveLatestRKE2Patch(highestMinor int) (string, error) {
+	releaseNotesURL := fmt.Sprintf("https://docs.rke2.io/release-notes/v1.%d.X", highestMinor)
+	body, err := fetchURLBody(releaseNotesURL)
+	if err != nil {
+		return "", err
+	}
+
+	pattern := regexp.MustCompile(fmt.Sprintf(`v1\.%d\.\d+\+rke2r\d+`, highestMinor))
+	match := pattern.FindString(body)
+	if match == "" {
+		return "", fmt.Errorf("could not find an RKE2 patch release in %s", releaseNotesURL)
+	}
+	return match, nil
+}
+
+func resolveInstallerSHA256(rke2Version string) (string, error) {
+	installScriptURL := fmt.Sprintf("https://raw.githubusercontent.com/rancher/rke2/%s/install.sh", rke2Version)
+	body, err := fetchURLBody(installScriptURL)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func buildAutoHelmCommands(totalHAs int, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage string) []string {
+	baseSettings := []string{
+		"helm install rancher " + chartRepoAlias + "/rancher \\",
+		"  --namespace cattle-system \\",
+		"  --version " + chartVersion + " \\",
+		"  --set hostname=placeholder \\",
+		"  --set bootstrapPassword=" + bootstrapPassword + " \\",
+		"  --set ingress.tls.source=secret \\",
+		"  --set global.cattle.psp.enabled=false \\",
+		"  --set agentTLSMode=system-store",
+	}
+
+	if rancherImage != "" {
+		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
+			"  --set rancherImage=" + rancherImage + " \\",
+		}, baseSettings[len(baseSettings)-1:]...)...)
+	}
+	if rancherImageTag != "" {
+		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
+			"  --set rancherImageTag=" + rancherImageTag + " \\",
+		}, baseSettings[len(baseSettings)-1:]...)...)
+	}
+	if agentImage != "" {
+		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
+			"  --set 'extraEnv[0].name=CATTLE_AGENT_IMAGE' \\",
+			"  --set 'extraEnv[0].value=" + agentImage + "' \\",
+		}, baseSettings[len(baseSettings)-1:]...)...)
+	}
+
+	command := strings.Join(baseSettings, "\n")
+	commands := make([]string, totalHAs)
+	for i := 0; i < totalHAs; i++ {
+		commands[i] = command
+	}
+	return commands
+}
+
+func fetchURLBody(url string) (string, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected HTTP status %d fetching %s", resp.StatusCode, url)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s: %w", url, err)
+	}
+	return string(body), nil
+}
+
+func extractTextFromHTML(document string) (string, error) {
+	root, err := html.Parse(strings.NewReader(document))
+	if err != nil {
+		return "", err
+	}
+
+	var textParts []string
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.TextNode {
+			text := strings.TrimSpace(node.Data)
+			if text != "" {
+				textParts = append(textParts, text)
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+
+	return strings.Join(textParts, " "), nil
+}
+
 func validateLocalToolingPreflight(helmCommands []string) error {
 	log.Printf("[preflight] Validating local tooling before provisioning...")
 
@@ -542,6 +1284,91 @@ func validateLocalToolingPreflight(helmCommands []string) error {
 
 	log.Printf("[preflight] Local tooling validated successfully")
 	return nil
+}
+
+func validateSecretEnvironment() error {
+	loadSecretEnvironmentFromZProfile()
+
+	requiredEnvVars := []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}
+	for _, envVar := range requiredEnvVars {
+		if strings.TrimSpace(os.Getenv(envVar)) == "" {
+			return fmt.Errorf("%s must be set in the environment", envVar)
+		}
+	}
+
+	dockerhubUsername := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME"))
+	dockerhubPassword := strings.TrimSpace(os.Getenv("DOCKERHUB_PASSWORD"))
+	if (dockerhubUsername == "") != (dockerhubPassword == "") {
+		return fmt.Errorf("set both DOCKERHUB_USERNAME and DOCKERHUB_PASSWORD, or leave both unset")
+	}
+
+	log.Printf("[preflight] Secret environment validated successfully")
+	return nil
+}
+
+func loadSecretEnvironmentFromZProfile() {
+	desiredVars := []string{
+		"AWS_ACCESS_KEY_ID",
+		"AWS_SECRET_ACCESS_KEY",
+		"DOCKERHUB_USERNAME",
+		"DOCKERHUB_PASSWORD",
+	}
+
+	missingVars := 0
+	for _, envVar := range desiredVars {
+		if strings.TrimSpace(os.Getenv(envVar)) == "" {
+			missingVars++
+		}
+	}
+	if missingVars == 0 {
+		return
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+
+	zprofilePath := filepath.Join(homeDir, ".zprofile")
+	content, err := os.ReadFile(zprofilePath)
+	if err != nil {
+		return
+	}
+
+	loadedVars := 0
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.HasPrefix(line, "export ") {
+			continue
+		}
+
+		parts := strings.SplitN(strings.TrimSpace(strings.TrimPrefix(line, "export ")), "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		if !slices.Contains(desiredVars, key) {
+			continue
+		}
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			continue
+		}
+
+		value = strings.Trim(value, `"'`)
+		if value == "" {
+			continue
+		}
+
+		if os.Setenv(key, value) == nil {
+			loadedVars++
+		}
+	}
+
+	if loadedVars > 0 {
+		log.Printf("[preflight] Loaded %d secret environment value(s) from ~/.zprofile", loadedVars)
+	}
 }
 
 func findMissingHelmRepos(helmRepoListOutput string, helmCommands []string) []string {
@@ -587,9 +1414,7 @@ func findMissingHelmRepos(helmRepoListOutput string, helmCommands []string) []st
 	return missing
 }
 
-func getRKE2InstallScriptURL() (string, string, error) {
-	rke2Version := viper.GetString("k8s.version")
-	expectedInstallerSHA256 := viper.GetString("rke2.install_script_sha256")
+func getRKE2InstallScriptURL(rke2Version, expectedInstallerSHA256 string) (string, string, error) {
 	if rke2Version == "" {
 		return "", "", fmt.Errorf("k8s.version must be set")
 	}
@@ -601,14 +1426,51 @@ func getRKE2InstallScriptURL() (string, string, error) {
 	return installScriptURL, expectedInstallerSHA256, nil
 }
 
-func validatePinnedRKE2InstallerChecksum() error {
-	installScriptURL, expectedInstallerSHA256, err := getRKE2InstallScriptURL()
-	if err != nil {
-		return err
-	}
-
+func validatePinnedRKE2InstallerChecksum(plans []*RancherResolvedPlan) error {
 	log.Printf("[preflight] Validating pinned RKE2 installer checksum before provisioning...")
 
+	if len(plans) == 0 {
+		installScriptURL, expectedInstallerSHA256, err := getRKE2InstallScriptURL(
+			viper.GetString("k8s.version"),
+			viper.GetString("rke2.install_script_sha256"),
+		)
+		if err != nil {
+			return err
+		}
+		if err := validateSinglePinnedRKE2InstallerChecksum(installScriptURL, expectedInstallerSHA256); err != nil {
+			return err
+		}
+		log.Printf("[preflight] RKE2 installer checksum validated successfully")
+		return nil
+	}
+
+	seen := map[string]bool{}
+	for _, plan := range plans {
+		if plan == nil {
+			continue
+		}
+
+		installScriptURL, expectedInstallerSHA256, err := getRKE2InstallScriptURL(plan.RecommendedRKE2Version, plan.InstallerSHA256)
+		if err != nil {
+			return err
+		}
+
+		dedupKey := installScriptURL + "|" + strings.ToLower(expectedInstallerSHA256)
+		if seen[dedupKey] {
+			continue
+		}
+		seen[dedupKey] = true
+
+		if err := validateSinglePinnedRKE2InstallerChecksum(installScriptURL, expectedInstallerSHA256); err != nil {
+			return err
+		}
+	}
+
+	log.Printf("[preflight] RKE2 installer checksum validated successfully")
+	return nil
+}
+
+func validateSinglePinnedRKE2InstallerChecksum(installScriptURL, expectedInstallerSHA256 string) error {
 	resp, err := http.Get(installScriptURL)
 	if err != nil {
 		return fmt.Errorf("failed to download installer from %s: %w", installScriptURL, err)
@@ -629,7 +1491,6 @@ func validatePinnedRKE2InstallerChecksum() error {
 		return fmt.Errorf("installer checksum mismatch for %s: expected %s, got %s", installScriptURL, expectedInstallerSHA256, actualInstallerSHA256)
 	}
 
-	log.Printf("[preflight] RKE2 installer checksum validated successfully")
 	return nil
 }
 
@@ -640,12 +1501,11 @@ func isRKE2InstallerChecksumFailure(stdout, stderr string) bool {
 
 // buildRKE2InstallCommand downloads the version-pinned RKE2 installer script,
 // checks that it matches the pinned SHA256, and only then executes it.
-func buildRKE2InstallCommand(nodeType string) (string, error) {
-	installScriptURL, expectedInstallerSHA256, err := getRKE2InstallScriptURL()
+func buildRKE2InstallCommand(nodeType string, rke2Version string, expectedInstallerSHA256 string) (string, error) {
+	installScriptURL, expectedInstallerSHA256, err := getRKE2InstallScriptURL(rke2Version, expectedInstallerSHA256)
 	if err != nil {
 		return "", err
 	}
-	rke2Version := viper.GetString("k8s.version")
 
 	return fmt.Sprintf(`tmp_script="$(mktemp /tmp/rke2-install.XXXXXX.sh)"
 trap 'rm -f "$tmp_script"' EXIT
@@ -658,7 +1518,7 @@ if ! echo %s"  $tmp_script" | sha256sum -c -; then
   echo "############################################################" >&2
   echo "# SECURITY ERROR: RKE2 installer checksum validation failed #" >&2
   echo "# Refusing to run the downloaded installer.                #" >&2
-  echo "# Check k8s.version and rke2.install_script_sha256.        #" >&2
+  echo "# Check the resolved RKE2 version and installer checksum.  #" >&2
   echo "############################################################" >&2
   exit 1
 fi
@@ -690,8 +1550,6 @@ func getTerraformOptions(t *testing.T, totalHAs int) *terraform.Options {
 		Vars: map[string]interface{}{
 			"total_has":             totalHAs,
 			"aws_prefix":            viper.GetString("tf_vars.aws_prefix"),
-			"aws_access_key":        viper.GetString("tf_vars.aws_access_key"),
-			"aws_secret_key":        viper.GetString("tf_vars.aws_secret_key"),
 			"aws_vpc":               viper.GetString("tf_vars.aws_vpc"),
 			"aws_subnet_a":          viper.GetString("tf_vars.aws_subnet_a"),
 			"aws_subnet_b":          viper.GetString("tf_vars.aws_subnet_b"),
@@ -707,8 +1565,6 @@ func getTerraformOptions(t *testing.T, totalHAs int) *terraform.Options {
 
 func generateAwsVars() {
 	hcl.GenAwsVar(
-		viper.GetString("tf_vars.aws_access_key"),
-		viper.GetString("tf_vars.aws_secret_key"),
 		viper.GetString("tf_vars.aws_prefix"),
 		viper.GetString("tf_vars.aws_vpc"),
 		viper.GetString("tf_vars.aws_subnet_a"),
@@ -756,8 +1612,14 @@ func logHASummary(totalHAs int, outputs map[string]string) {
 	}
 }
 
-func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
+func setupFirstServerNode(ip string, haOutputs TerraformOutputs, resolvedPlan *RancherResolvedPlan) error {
 	log.Printf("[setupFirstServerNode] Starting setup for IP %s", ip)
+	rke2K8sVersion := viper.GetString("k8s.version")
+	expectedInstallerSHA256 := viper.GetString("rke2.install_script_sha256")
+	if resolvedPlan != nil {
+		rke2K8sVersion = resolvedPlan.RecommendedRKE2Version
+		expectedInstallerSHA256 = resolvedPlan.InstallerSHA256
+	}
 
 	// Create config directory
 	log.Printf("[setupFirstServerNode] Creating config directory...")
@@ -806,7 +1668,6 @@ func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
 
 	// Check if we should pre-download RKE2 images to avoid Docker Hub rate limiting
 	preloadImages := viper.GetBool("rke2.preload_images")
-	rke2K8sVersion := viper.GetString("k8s.version")
 
 	if preloadImages {
 		log.Printf("[setupFirstServerNode] Pre-downloading RKE2 images to avoid Docker Hub rate limiting...")
@@ -844,8 +1705,8 @@ func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
 	}
 
 	// Create registries.yaml with Docker Hub authentication if credentials are provided
-	dockerUsername := viper.GetString("dockerhub.username")
-	dockerPassword := viper.GetString("dockerhub.password")
+	dockerUsername := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME"))
+	dockerPassword := strings.TrimSpace(os.Getenv("DOCKERHUB_PASSWORD"))
 
 	if dockerUsername != "" && dockerPassword != "" {
 		log.Printf("[setupFirstServerNode] Configuring Docker Hub authentication...")
@@ -875,7 +1736,7 @@ func setupFirstServerNode(ip string, haOutputs TerraformOutputs) error {
 
 	// Install RKE2 server
 	log.Printf("[setupFirstServerNode] Installing RKE2 version %s...", rke2K8sVersion)
-	cmd, err = buildRKE2InstallCommand("server")
+	cmd, err = buildRKE2InstallCommand("server", rke2K8sVersion, expectedInstallerSHA256)
 	if err != nil {
 		return fmt.Errorf("failed to build RKE2 install command: %w", err)
 	}
@@ -1016,7 +1877,14 @@ func getNodeToken(ip string) (string, error) {
 	return token, nil
 }
 
-func setupAdditionalServerNode(ip, token string, haOutputs TerraformOutputs) error {
+func setupAdditionalServerNode(ip, token string, haOutputs TerraformOutputs, resolvedPlan *RancherResolvedPlan) error {
+	rke2K8sVersion := viper.GetString("k8s.version")
+	expectedInstallerSHA256 := viper.GetString("rke2.install_script_sha256")
+	if resolvedPlan != nil {
+		rke2K8sVersion = resolvedPlan.RecommendedRKE2Version
+		expectedInstallerSHA256 = resolvedPlan.InstallerSHA256
+	}
+
 	// Create config directory
 	cmd := "sudo mkdir -p /etc/rancher/rke2"
 	_, err := RunCommand(cmd, ip)
@@ -1052,7 +1920,6 @@ tls-san:
 
 	// Check if we should pre-download RKE2 images to avoid Docker Hub rate limiting
 	preloadImages := viper.GetBool("rke2.preload_images")
-	rke2K8sVersion := viper.GetString("k8s.version")
 
 	if preloadImages {
 		log.Printf("[setupAdditionalServerNode] Pre-downloading RKE2 images for %s...", ip)
@@ -1086,8 +1953,8 @@ tls-san:
 	}
 
 	// Create registries.yaml with Docker Hub authentication if credentials are provided
-	dockerUsername := viper.GetString("dockerhub.username")
-	dockerPassword := viper.GetString("dockerhub.password")
+	dockerUsername := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME"))
+	dockerPassword := strings.TrimSpace(os.Getenv("DOCKERHUB_PASSWORD"))
 
 	if dockerUsername != "" && dockerPassword != "" {
 		log.Printf("[setupAdditionalServerNode] Configuring Docker Hub authentication for %s...", ip)
@@ -1117,7 +1984,7 @@ tls-san:
 
 	// Install RKE2 server
 	log.Printf("[setupAdditionalServerNode] Installing RKE2 version %s on %s...", rke2K8sVersion, ip)
-	cmd, err = buildRKE2InstallCommand("server")
+	cmd, err = buildRKE2InstallCommand("server", rke2K8sVersion, expectedInstallerSHA256)
 	if err != nil {
 		return fmt.Errorf("failed to build RKE2 install command: %w", err)
 	}

@@ -83,32 +83,140 @@ This will:
 
 ## Configuration
 
+Use one of these checked-in examples as your starting point:
+
+- [tool-config.auto.example.yml](/Users/andrewbrudnak/github.com/brudnak/ha-rancher-rke2/tool-config.auto.example.yml)
+- [tool-config.manual.example.yml](/Users/andrewbrudnak/github.com/brudnak/ha-rancher-rke2/tool-config.manual.example.yml)
+
+Then copy the one you want to `tool-config.yml` and adjust the non-secret values.
+
+### Environment Secrets
+
+These four secrets are now read from environment variables only:
+
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_PASSWORD`
+
+The cleanest setup on your machine is to put them in `~/.zprofile`:
+
+```bash
+export AWS_ACCESS_KEY_ID="your-aws-access-key"
+export AWS_SECRET_ACCESS_KEY="your-aws-secret-key"
+export DOCKERHUB_USERNAME="your-dockerhub-username"
+export DOCKERHUB_PASSWORD="your-dockerhub-password"
+```
+
+Then reload your shell:
+
+```bash
+source ~/.zprofile
+```
+
+If you do not want Docker Hub authentication, leave both Docker Hub environment variables unset.
+
 ### Sample `tool-config.yml`
 
 For available RKE2 Kubernetes versions, refer to: [RKE2 v1.32.X Release Notes](https://docs.rke2.io/release-notes/v1.32.X)
 
 ### Important Configuration Notes
 
-- The number of Helm commands under `rancher.helm_commands` **must match** the `total_has` value
+- `rancher.mode` supports:
+  - `manual` to provide full Helm commands yourself
+  - `auto` to provide one or more Rancher versions and let the tool resolve chart source, image source, RKE2 version, and installer checksum for you
+- In `manual` mode, the number of Helm commands under `rancher.helm_commands` **must match** `total_has`
+- In `auto` mode:
+  - use `rancher.version` for a single HA
+  - use `rancher.versions` for multiple HAs, with exactly one version per HA
 - Each Helm command will be used for a specific HA instance (first command for first instance, etc.)
 - You can customize each Helm command with different parameters (bootstrap password, version, etc.)
 - The `hostname` parameter in each Helm command will be automatically replaced with the correct URL
   - You can leave it blank, use a placeholder, or include your own value (it will be overridden)
-- The tool will validate that the number of commands matches `total_has` and fail with an error if they don't match
+- The tool validates your config shape and fails early if the number of versions or Helm commands does not match `total_has`
 - The install script is automatically executed for each HA instance during setup
-- `k8s.version` is the RKE2 version to install
-- `rke2.install_script_sha256` is the SHA256 of the exact RKE2 installer script for that version
+- In `manual` mode:
+  - use `k8s.version` for a single HA
+  - use `k8s.versions` for multiple HAs, with exactly one RKE2 version per HA
+  - use `rke2.install_script_sha256` for a single HA
+  - use `rke2.install_script_sha256s` for multiple HAs, keyed by exact RKE2 version
 - `rke2.preload_images: true` downloads the RKE2 image bundle before install to help avoid Docker Hub rate limits
-- `dockerhub.username` and `dockerhub.password` are optional
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` must be set in your shell environment
+- `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` are optional environment variables
   - If you set them, the tool creates `/etc/rancher/rke2/registries.yaml` so RKE2 can authenticate to Docker Hub
-  - If you leave them blank, the tool skips Docker Hub authentication
+  - If you leave them unset, the tool skips Docker Hub authentication
+- In `auto` mode, the tool prints a resolved plan for each HA and asks you to continue before provisioning starts
 - The project does not use `curl | sh` for the RKE2 installer anymore
   - It downloads the versioned installer script
   - It checks that script against the pinned SHA256
   - It only runs the script if the checksum matches
 
+### Auto Mode Example
+
+Use `auto` mode when you want to provide a Rancher version and let the tool resolve the rest.
+
 ```yaml
 rancher:
+  mode: auto
+  versions:
+    - "2.13-head"
+    - "2.14.0"
+  distro: auto
+  bootstrap_password: "your-password"
+  auto_approve: false
+
+rke2:
+  preload_images: true
+
+total_has: 2  # Number of HA clusters to create (must match number of rancher.versions in auto mode)
+
+tf_vars:
+  aws_region: "us-east-2"
+  aws_prefix: "xyz" # your initials, keep it short! 
+  aws_vpc: ""
+  aws_subnet_a: ""
+  aws_subnet_b: ""
+  aws_subnet_c: ""
+  aws_ami: ""
+  aws_subnet_id: ""
+  aws_security_group_id: ""
+  aws_pem_key_name: ""
+  aws_route53_fqdn: ""
+```
+
+In `auto` mode, the tool will:
+
+1. Resolve the Rancher chart repo and chart version for each HA version you requested
+2. Resolve the Rancher image settings for each HA
+3. Look up a supported RKE2 minor from the Rancher support matrix
+4. Pick the latest patch release in that RKE2 line
+5. Resolve the installer SHA256 for that exact RKE2 version
+6. Generate one Helm command per HA and inject the correct URL later during setup
+7. Print the generated plan(s)
+8. Ask you to continue or cancel before provisioning
+
+For a single HA, you can use this shorter config:
+
+```yaml
+rancher:
+  mode: auto
+  version: "2.13-head"
+  distro: auto
+  bootstrap_password: "your-password"
+  auto_approve: false
+
+total_has: 1
+```
+
+If you do not want Docker Hub authentication, leave both `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` unset in your shell.
+
+### Manual Mode Example
+
+Use `manual` mode when you want full control over the Helm commands.
+
+```yaml
+rancher:
+  mode: manual
   helm_commands:
     - |
       helm install rancher rancher-latest/rancher \
@@ -130,41 +238,34 @@ rancher:
         --set rancherImageTag=v2.14.0 \
         --version 2.14.0 \
         --set agentTLSMode=system-store
-      
+
+total_has: 2
+
+k8s:
+  versions:
+    - "v1.33.7+rke2r1"
+    - "v1.34.6+rke2r1"
+
+rke2:
+  install_script_sha256s:
+    v1.33.7+rke2r1: "bfbd978d603b7070f5748c934326db509bf1470c97d3f61a3aaa6e2eed6bd054"
+    v1.34.6+rke2r1: "2d24db2184dd6b1a5e281fa45cc9a8234c889394721746f89b5fe953fdaaf40a"
+  preload_images: true
+```
+
+For a single manual HA, the older shorter form still works:
+
+```yaml
 k8s:
   version: "v1.33.7+rke2r1"
 
 rke2:
   install_script_sha256: "bfbd978d603b7070f5748c934326db509bf1470c97d3f61a3aaa6e2eed6bd054"
-  preload_images: true
-
-total_has: 2  # Number of HA clusters to create (must match number of helm_commands)
-
-tf_vars:
-  aws_region: "us-east-2"
-  aws_access_key: "super-secret-key"
-  aws_secret_key: "super-secret-key"
-  aws_prefix: "xyz" # your initials, keep it short! 
-  aws_vpc: ""
-  aws_subnet_a: ""
-  aws_subnet_b: ""
-  aws_subnet_c: ""
-  aws_ami: ""
-  aws_subnet_id: ""
-  aws_security_group_id: ""
-  aws_pem_key_name: ""
-  aws_route53_fqdn: ""
-
-dockerhub:
-  username: ""
-  password: ""
 ```
-
-If you do not want Docker Hub authentication, leave both `dockerhub.username` and `dockerhub.password` blank.
 
 ### Updating the RKE2 checksum
 
-You only need to update `rke2.install_script_sha256` when you change `k8s.version`.
+You only need to update the checksum values manually when you use `manual` mode and change the matching RKE2 version.
 
 1. Pick the RKE2 version you want.
 2. Download that exact installer script.
