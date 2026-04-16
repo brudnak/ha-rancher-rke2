@@ -178,7 +178,7 @@ func TestHaSetup(t *testing.T) {
 		t.Fatalf("Error during parallel HA setup: %v", setupErr)
 	}
 
-	logHASummary(totalHAs, outputs)
+	logHASummary(totalHAs, outputs, resolvedPlans)
 }
 
 // setupHAInstance is a helper that returns errors instead of failing immediately
@@ -326,7 +326,7 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string, r
 
 	log.Printf("HA %d setup complete", instanceNum)
 	log.Printf("HA %d LB: %s", instanceNum, haOutputs.LoadBalancerDNS)
-	log.Printf("HA %d Rancher URL: %s", instanceNum, haOutputs.RancherURL)
+	log.Printf("HA %d Rancher URL: %s", instanceNum, clickableURL(haOutputs.RancherURL))
 
 	return nil
 }
@@ -813,6 +813,17 @@ func sanitizeHelmCommandForLog(command string) string {
 func sanitizeHelmCommandForDialog(command string) string {
 	sanitized := sanitizeHelmCommandForLog(command)
 	return strings.TrimSpace(sanitized)
+}
+
+func clickableURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
+	}
+	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
+		return value
+	}
+	return "https://" + value
 }
 
 func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
@@ -1896,11 +1907,19 @@ func getHAOutputs(instanceNum int, outputs map[string]string) TerraformOutputs {
 	}
 }
 
-func logHASummary(totalHAs int, outputs map[string]string) {
+func logHASummary(totalHAs int, outputs map[string]string, resolvedPlans []*RancherResolvedPlan) {
 	log.Printf("HA setup complete. Rancher URLs:")
 	for i := 1; i <= totalHAs; i++ {
 		haOutputs := getHAOutputs(i, outputs)
-		log.Printf("Rancher instance %d -> %s", i, haOutputs.RancherURL)
+		requestedVersion := ""
+		if len(resolvedPlans) >= i && resolvedPlans[i-1] != nil {
+			requestedVersion = resolvedPlans[i-1].RequestedVersion
+		}
+		if requestedVersion != "" {
+			log.Printf("Rancher instance %d (%s) -> %s", i, requestedVersion, clickableURL(haOutputs.RancherURL))
+			continue
+		}
+		log.Printf("Rancher instance %d -> %s", i, clickableURL(haOutputs.RancherURL))
 	}
 }
 
