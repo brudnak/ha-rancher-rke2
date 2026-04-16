@@ -725,6 +725,9 @@ func buildResolvedPlansDialogMessage(plans []*RancherResolvedPlan) string {
 		if plan.ChartRepoAlias != "" && plan.ChartVersion != "" {
 			sectionLines = append(sectionLines, fmt.Sprintf("Selected chart: %s/rancher@%s", plan.ChartRepoAlias, plan.ChartVersion))
 		}
+		if plan.RecommendedRKE2Version != "" {
+			sectionLines = append(sectionLines, "Resolved RKE2/K8s: "+plan.RecommendedRKE2Version)
+		}
 		for commandIndex, helmCommand := range plan.HelmCommands {
 			sectionLines = append(sectionLines, fmt.Sprintf("Helm command %d:", commandIndex+1))
 			sectionLines = append(sectionLines, sanitizeHelmCommandForDialog(helmCommand))
@@ -852,6 +855,12 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 		}
 
 		rancherImage, rancherImageTag, agentImage, imageExplanation := resolveImageSettings(requestedVersion, buildType, resolvedDistro)
+		if buildType != "release" && chartVersion == requestedVersion {
+			rancherImage = ""
+			rancherImageTag = ""
+			agentImage = ""
+			explanation = append(explanation, fmt.Sprintf("Using exact chart match %s/rancher@%s, so no Rancher image overrides are needed", chartRepoAlias, chartVersion))
+		}
 		if buildType != "release" && chartRepoAlias == "rancher-latest" {
 			rancherImage = ""
 			agentImage = ""
