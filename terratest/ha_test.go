@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -655,7 +656,7 @@ func confirmResolvedPlans(plans []*RancherResolvedPlan) error {
 		return fmt.Errorf("failed to inspect stdin for confirmation prompt: %w", err)
 	}
 	if stdinInfo.Mode()&os.ModeCharDevice == 0 {
-		approved, err := confirmResolvedPlansWithOSDialog()
+		approved, err := confirmResolvedPlansWithOSDialog(plans)
 		if err == nil {
 			if approved {
 				log.Printf("[resolver] User approved resolved Rancher plans")
@@ -670,7 +671,7 @@ func confirmResolvedPlans(plans []*RancherResolvedPlan) error {
 	reader := bufio.NewReader(os.Stdin)
 	response, err := reader.ReadString('\n')
 	if err != nil {
-		approved, dialogErr := confirmResolvedPlansWithOSDialog()
+		approved, dialogErr := confirmResolvedPlansWithOSDialog(plans)
 		if dialogErr == nil {
 			if approved {
 				log.Printf("[resolver] User approved resolved Rancher plans")
@@ -690,18 +691,49 @@ func confirmResolvedPlans(plans []*RancherResolvedPlan) error {
 	}
 }
 
-func confirmResolvedPlansWithOSDialog() (bool, error) {
+func confirmResolvedPlansWithOSDialog(plans []*RancherResolvedPlan) (bool, error) {
 	if runtime.GOOS != "darwin" {
 		return false, fmt.Errorf("OS dialog confirmation is only supported on macOS")
 	}
 
-	script := `button returned of (display dialog "Continue with this Rancher plan?" buttons {"Cancel", "Continue"} default button "Continue" cancel button "Cancel" with title "Rancher Plan Confirmation")`
-	output, err := exec.Command("osascript", "-e", script).CombinedOutput()
+	script := `on run argv
+set planMessage to item 1 of argv
+button returned of (display dialog planMessage buttons {"Cancel", "Continue"} default button "Continue" cancel button "Cancel" with title "Rancher Plan Confirmation")
+end run`
+	output, err := exec.Command("osascript", "-e", script, buildResolvedPlansDialogMessage(plans)).CombinedOutput()
 	if err != nil {
 		return false, err
 	}
 
 	return strings.Contains(string(output), "Continue"), nil
+}
+
+func buildResolvedPlansDialogMessage(plans []*RancherResolvedPlan) string {
+	sections := []string{"Continue with this Rancher plan?"}
+
+	for i, plan := range plans {
+		if plan == nil {
+			continue
+		}
+
+		sectionLines := []string{
+			fmt.Sprintf("HA %d", i+1),
+		}
+		if plan.RequestedVersion != "" {
+			sectionLines = append(sectionLines, "Requested Rancher: "+plan.RequestedVersion)
+		}
+		if plan.ChartRepoAlias != "" && plan.ChartVersion != "" {
+			sectionLines = append(sectionLines, fmt.Sprintf("Selected chart: %s/rancher@%s", plan.ChartRepoAlias, plan.ChartVersion))
+		}
+		for commandIndex, helmCommand := range plan.HelmCommands {
+			sectionLines = append(sectionLines, fmt.Sprintf("Helm command %d:", commandIndex+1))
+			sectionLines = append(sectionLines, sanitizeHelmCommandForDialog(helmCommand))
+		}
+
+		sections = append(sections, strings.Join(sectionLines, "\n"))
+	}
+
+	return strings.Join(sections, "\n\n")
 }
 
 func prepareManualRKE2Plans(totalHAs int) ([]*RancherResolvedPlan, error) {
@@ -775,9 +807,18 @@ func sanitizeHelmCommandForLog(command string) string {
 	return sanitized
 }
 
+func sanitizeHelmCommandForDialog(command string) string {
+	sanitized := sanitizeHelmCommandForLog(command)
+	return strings.TrimSpace(sanitized)
+}
+
 func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 	requestedVersions, err := getRequestedRancherVersions(totalHAs)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := refreshHelmRepoIndexes(); err != nil {
 		return nil, err
 	}
 
@@ -1005,39 +1046,142 @@ func chooseRancherSourceCandidates(requestedDistro, buildType string) ([]string,
 }
 
 func resolveChartAndBaseline(repoCandidates []string, requestedVersion, minorLine, buildType string) (string, string, string, error) {
+	if globalExactMatch, err := findExactRequestedChartAcrossRepos(repoCandidates, requestedVersion); err == nil {
+		compatibilityBaseline := requestedVersion
+		if buildType != "release" {
+			compatibilityBaseline, err = resolveCompatibilityBaseline(minorLine)
+			if err != nil {
+				compatibilityBaseline = requestedVersion
+			}
+		}
+		log.Printf("[resolver] Global exact Rancher chart match selected for %s: %s/rancher@%s", requestedVersion, globalExactMatch.repoAlias, globalExactMatch.chartVersion)
+		return globalExactMatch.repoAlias, globalExactMatch.chartVersion, compatibilityBaseline, nil
+	}
+
 	var lastErr error
+	var bestMatch *resolvedChartMatch
 	for _, repoAlias := range repoCandidates {
 		results, err := searchHelmRepoVersions(repoAlias)
 		if err != nil {
+			log.Printf("[resolver] Repo candidate %s query failed for Rancher %s: %v", repoAlias, requestedVersion, err)
 			lastErr = err
 			continue
 		}
 		if len(results) == 0 {
+			log.Printf("[resolver] Repo candidate %s returned no Rancher chart versions for %s", repoAlias, requestedVersion)
 			continue
 		}
 
 		switch buildType {
 		case "release":
-			if hasChartVersion(results, requestedVersion) {
-				return repoAlias, requestedVersion, requestedVersion, nil
+			hasExactRequested := hasChartVersion(results, requestedVersion)
+			log.Printf("[resolver] Repo candidate %s inspection for release %s: exactRequested=%t", repoAlias, requestedVersion, hasExactRequested)
+			if hasExactRequested {
+				recordResolvedChartMatch(&bestMatch, repoAlias, requestedVersion, requestedVersion, 0)
 			}
 		default:
-			chartVersion, err := findLatestMinorRelease(results, minorLine)
-			if err == nil {
-				compatibilityBaseline, baselineErr := resolveReleasedCompatibilityBaseline(minorLine)
-				if baselineErr != nil {
-					compatibilityBaseline = chartVersion
-				}
-				return repoAlias, chartVersion, compatibilityBaseline, nil
+			sameMinorRelease, sameMinorReleaseErr := findLatestMinorRelease(results, minorLine)
+			compatibilityBaseline, baselineErr := resolveCompatibilityBaseline(minorLine)
+			hasExactRequested := hasChartVersion(results, requestedVersion)
+			hasCompatibilityBaseline := baselineErr == nil && hasChartVersion(results, compatibilityBaseline)
+			if sameMinorReleaseErr != nil {
+				log.Printf("[resolver] Repo candidate %s inspection for %s: exactRequested=%t sameMinorRelease=<none> fallbackBaseline=%s fallbackPresent=%t", repoAlias, requestedVersion, hasExactRequested, summarizeBaselineLogValue(compatibilityBaseline, baselineErr), hasCompatibilityBaseline)
+			} else {
+				log.Printf("[resolver] Repo candidate %s inspection for %s: exactRequested=%t sameMinorRelease=%s fallbackBaseline=%s fallbackPresent=%t", repoAlias, requestedVersion, hasExactRequested, sameMinorRelease, summarizeBaselineLogValue(compatibilityBaseline, baselineErr), hasCompatibilityBaseline)
 			}
-			lastErr = err
+
+			if hasChartVersion(results, requestedVersion) {
+				if baselineErr != nil {
+					compatibilityBaseline = requestedVersion
+				}
+				recordResolvedChartMatch(&bestMatch, repoAlias, requestedVersion, compatibilityBaseline, 0)
+			}
+
+			if sameMinorReleaseErr == nil {
+				if baselineErr != nil {
+					compatibilityBaseline = sameMinorRelease
+				}
+				recordResolvedChartMatch(&bestMatch, repoAlias, sameMinorRelease, compatibilityBaseline, 1)
+			}
+
+			if baselineErr == nil && hasChartVersion(results, compatibilityBaseline) {
+				recordResolvedChartMatch(&bestMatch, repoAlias, compatibilityBaseline, compatibilityBaseline, 2)
+			}
+			lastErr = sameMinorReleaseErr
 		}
+	}
+
+	if bestMatch != nil {
+		return bestMatch.repoAlias, bestMatch.chartVersion, bestMatch.compatibilityBaseline, nil
 	}
 
 	if lastErr != nil {
 		return "", "", "", lastErr
 	}
 	return "", "", "", fmt.Errorf("could not resolve a Rancher chart version for %s from repos %s", requestedVersion, strings.Join(repoCandidates, ", "))
+}
+
+type resolvedChartMatch struct {
+	repoAlias             string
+	chartVersion          string
+	compatibilityBaseline string
+	matchRank             int
+}
+
+func recordResolvedChartMatch(bestMatch **resolvedChartMatch, repoAlias, chartVersion, compatibilityBaseline string, matchRank int) {
+	if *bestMatch == nil || matchRank < (*bestMatch).matchRank {
+		*bestMatch = &resolvedChartMatch{
+			repoAlias:             repoAlias,
+			chartVersion:          chartVersion,
+			compatibilityBaseline: compatibilityBaseline,
+			matchRank:             matchRank,
+		}
+	}
+}
+
+func findExactRequestedChartAcrossRepos(repoCandidates []string, requestedVersion string) (*resolvedChartMatch, error) {
+	globalResults, err := searchAllHelmRepoVersions()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, repoAlias := range repoCandidates {
+		for _, result := range globalResults {
+			if result.Name != fmt.Sprintf("%s/rancher", repoAlias) {
+				continue
+			}
+			if result.Version == requestedVersion || normalizeVersionInput(result.AppVersion) == requestedVersion {
+				return &resolvedChartMatch{
+					repoAlias:    repoAlias,
+					chartVersion: result.Version,
+					matchRank:    0,
+				}, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("no exact chart match found across repos for Rancher %s", requestedVersion)
+}
+
+func summarizeBaselineLogValue(compatibilityBaseline string, err error) string {
+	if err != nil {
+		return fmt.Sprintf("<unresolved: %v>", err)
+	}
+	return compatibilityBaseline
+}
+
+func resolveCompatibilityBaseline(minorLine string) (string, error) {
+	baseline, err := resolveReleasedCompatibilityBaseline(minorLine)
+	if err == nil {
+		return baseline, nil
+	}
+
+	previousMinorLine, previousErr := previousRancherMinorLine(minorLine)
+	if previousErr != nil {
+		return "", err
+	}
+
+	return resolveReleasedCompatibilityBaseline(previousMinorLine)
 }
 
 func resolveReleasedCompatibilityBaseline(minorLine string) (string, error) {
@@ -1072,9 +1216,31 @@ func resolveReleasedCompatibilityBaseline(minorLine string) (string, error) {
 	return bestVersion.Original(), nil
 }
 
+func previousRancherMinorLine(minorLine string) (string, error) {
+	parts := strings.Split(minorLine, ".")
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid Rancher minor line %q", minorLine)
+	}
+
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return "", fmt.Errorf("invalid Rancher major version in %q: %w", minorLine, err)
+	}
+
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("invalid Rancher minor version in %q: %w", minorLine, err)
+	}
+	if minor == 0 {
+		return "", fmt.Errorf("no earlier Rancher minor line exists before %s", minorLine)
+	}
+
+	return fmt.Sprintf("%d.%d", major, minor-1), nil
+}
+
 func searchHelmRepoVersions(repoAlias string) ([]helmSearchResult, error) {
 	chartRef := fmt.Sprintf("%s/rancher", repoAlias)
-	output, err := exec.Command("helm", "search", "repo", chartRef, "--versions", "-o", "json").CombinedOutput()
+	output, err := exec.Command("helm", "search", "repo", chartRef, "--devel", "--versions", "-o", "json").CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to query helm repo %s: %w", repoAlias, err)
 	}
@@ -1083,7 +1249,46 @@ func searchHelmRepoVersions(repoAlias string) ([]helmSearchResult, error) {
 	if err := json.Unmarshal(output, &results); err != nil {
 		return nil, fmt.Errorf("failed to parse helm search results for %s: %w", repoAlias, err)
 	}
+	if len(results) > 0 {
+		return results, nil
+	}
+
+	globalResults, err := searchAllHelmRepoVersions()
+	if err != nil {
+		return results, nil
+	}
+
+	filteredResults := filterHelmSearchResultsByRepoAlias(globalResults, repoAlias)
+	if len(filteredResults) > 0 {
+		log.Printf("[resolver] Falling back to global helm search results for repo %s", repoAlias)
+		return filteredResults, nil
+	}
+
 	return results, nil
+}
+
+func searchAllHelmRepoVersions() ([]helmSearchResult, error) {
+	output, err := exec.Command("helm", "search", "repo", "--regexp", ".*/rancher$", "--devel", "--versions", "-o", "json").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query helm repo globally for rancher charts: %w", err)
+	}
+
+	var results []helmSearchResult
+	if err := json.Unmarshal(output, &results); err != nil {
+		return nil, fmt.Errorf("failed to parse global helm search results: %w", err)
+	}
+	return results, nil
+}
+
+func filterHelmSearchResultsByRepoAlias(results []helmSearchResult, repoAlias string) []helmSearchResult {
+	chartRefPrefix := repoAlias + "/"
+	filteredResults := make([]helmSearchResult, 0)
+	for _, result := range results {
+		if strings.HasPrefix(result.Name, chartRefPrefix) {
+			filteredResults = append(filteredResults, result)
+		}
+	}
+	return filteredResults
 }
 
 func hasChartVersion(results []helmSearchResult, version string) bool {
@@ -1143,6 +1348,47 @@ func resolveImageSettings(requestedVersion, buildType, resolvedDistro string) (s
 func buildSupportMatrixURL(releasedVersion string) string {
 	pathVersion := strings.ReplaceAll(releasedVersion, ".", "-")
 	return fmt.Sprintf("https://www.suse.com/suse-rancher/support-matrix/all-supported-versions/rancher-v%s/", pathVersion)
+}
+
+func TestPreviousRancherMinorLine(t *testing.T) {
+	previousMinorLine, err := previousRancherMinorLine("2.15")
+	if err != nil {
+		t.Fatalf("expected previous Rancher minor line, got error: %v", err)
+	}
+
+	if previousMinorLine != "2.14" {
+		t.Fatalf("expected previous Rancher minor line 2.14, got %s", previousMinorLine)
+	}
+}
+
+func TestFindLatestMinorReleaseIgnoresPrereleases(t *testing.T) {
+	results := []helmSearchResult{
+		{Version: "2.15.0-alpha3"},
+		{Version: "2.14.1-rc1"},
+		{Version: "2.14.1"},
+		{Version: "2.14.0"},
+	}
+
+	version, err := findLatestMinorRelease(results, "2.14")
+	if err != nil {
+		t.Fatalf("expected released chart version, got error: %v", err)
+	}
+
+	if version != "2.14.1" {
+		t.Fatalf("expected latest released 2.14.x chart version, got %s", version)
+	}
+}
+
+func TestFindLatestMinorReleaseErrorsWithoutGA(t *testing.T) {
+	results := []helmSearchResult{
+		{Version: "2.15.0-alpha3"},
+		{Version: "2.15.0-rc1"},
+	}
+
+	_, err := findLatestMinorRelease(results, "2.15")
+	if err == nil {
+		t.Fatal("expected an error when no released chart version exists")
+	}
 }
 
 func resolveHighestSupportedRKE2Minor(supportMatrixURL string) (int, string, error) {
@@ -1291,12 +1537,9 @@ func validateLocalToolingPreflight(helmCommands []string) error {
 		}
 	}
 
-	log.Printf("[preflight] Running 'helm repo update'...")
-	helmRepoUpdateOutput, err := exec.Command("helm", "repo", "update").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to run 'helm repo update': %w", err)
+	if err := refreshHelmRepoIndexes(); err != nil {
+		return err
 	}
-	log.Printf("[preflight] Helm repo update completed (%d bytes)", len(strings.TrimSpace(string(helmRepoUpdateOutput))))
 
 	helmRepoOutput, err := exec.Command("helm", "repo", "list").CombinedOutput()
 	if err != nil {
@@ -1309,6 +1552,16 @@ func validateLocalToolingPreflight(helmCommands []string) error {
 	}
 
 	log.Printf("[preflight] Local tooling validated successfully")
+	return nil
+}
+
+func refreshHelmRepoIndexes() error {
+	log.Printf("[preflight] Running 'helm repo update'...")
+	helmRepoUpdateOutput, err := exec.Command("helm", "repo", "update").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to run 'helm repo update': %w", err)
+	}
+	log.Printf("[preflight] Helm repo update completed (%d bytes)", len(strings.TrimSpace(string(helmRepoUpdateOutput))))
 	return nil
 }
 
