@@ -81,6 +81,30 @@ This will:
 - Clean up generated files and folders
 - Remove all AWS resources
 
+## Local Control Panel
+
+To open the optional local-only Rancher control panel:
+
+```bash
+go test -v -run TestHAControlPanel -timeout 0 -count=1 ./terratest
+```
+
+This starts a browser-based control panel bound to `127.0.0.1` only. It is separate from setup and cleanup, so you can open it any time after provisioning, close it when you're done, and start it again later to re-check cluster health.
+
+`-count=1` is recommended here so `go test` does not reuse a cached prior success and immediately exit instead of starting a fresh panel.
+
+If you prefer using the IDE run button, `TestHAControlPanel` is also available alongside `TestHaSetup` and `TestHACleanup` in [terratest/ha_test.go](/Users/andrewbrudnak/github.com/brudnak/ha-rancher-rke2/terratest/ha_test.go).
+
+The control panel currently provides:
+
+- Per-HA Rancher cards with URL, kubeconfig path, and reachability
+- `cattle-system` visibility focused on Rancher and Rancher webhook pods
+- Recent pod logs and live log streaming
+- Active Rancher leader detection with a badge and change highlighting
+- A guarded cleanup button that requires typing `cleanup`
+
+The cleanup button calls the existing canonical cleanup flow (`TestHACleanup`) rather than introducing a separate destroy path.
+
 ## Configuration
 
 Use one of these checked-in examples as your starting point:

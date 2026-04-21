@@ -114,3 +114,7 @@ func TestHACleanup(t *testing.T) {
 		logCleanupCostEstimate(costEstimate)
 	}
 }
+
+func TestHAControlPanel(t *testing.T) {
+	runHAControlPanelTest(t)
+}
