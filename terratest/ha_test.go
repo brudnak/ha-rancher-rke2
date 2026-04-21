@@ -13,6 +13,11 @@ import (
 func TestHaSetup(t *testing.T) {
 	setupConfig(t)
 
+	if err := maybeEditAutoModePreflight(); err != nil {
+		t.Fatalf("Failed during Rancher preflight editor: %v", err)
+	}
+	setupConfig(t)
+
 	totalHAs := viper.GetInt("total_has")
 	if totalHAs < 1 {
 		t.Fatal("total_has must be at least 1")

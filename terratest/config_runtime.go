@@ -12,6 +12,7 @@ import (
 )
 
 func setupConfig(t *testing.T) {
+	viper.Reset()
 	viper.AddConfigPath("../")
 	viper.SetConfigName("tool-config")
 	viper.SetConfigType("yml")
