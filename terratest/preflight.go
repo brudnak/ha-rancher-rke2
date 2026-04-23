@@ -267,6 +267,28 @@ func isRKE2InstallerChecksumFailure(stdout, stderr string) bool {
 	return strings.Contains(combinedOutput, "SECURITY ERROR: RKE2 installer checksum validation failed")
 }
 
+func buildRKE2ImagesDownloadCommand(rke2Version string) string {
+	imagesURL := fmt.Sprintf("https://github.com/rancher/rke2/releases/download/%s/rke2-images.linux-amd64.tar.zst", rke2Version)
+	checksumURL := fmt.Sprintf("https://github.com/rancher/rke2/releases/download/%s/sha256sum-amd64.txt", rke2Version)
+
+	return fmt.Sprintf(`curl -fsSL -o /tmp/rke2-images.linux-amd64.tar.zst %s
+curl -fsSL -o /tmp/rke2-sha256sum-amd64.txt %s
+
+if ! (cd /tmp && grep 'rke2-images.linux-amd64.tar.zst' /tmp/rke2-sha256sum-amd64.txt | sha256sum -c -); then
+  echo "############################################################" >&2
+  echo "# SECURITY ERROR: RKE2 images checksum validation failed   #" >&2
+  echo "# Refusing to use the downloaded images tarball.           #" >&2
+  echo "############################################################" >&2
+  rm -f /tmp/rke2-images.linux-amd64.tar.zst /tmp/rke2-sha256sum-amd64.txt
+  exit 1
+fi
+
+rm -f /tmp/rke2-sha256sum-amd64.txt`,
+		shellSingleQuote(imagesURL),
+		shellSingleQuote(checksumURL),
+	)
+}
+
 func buildRKE2InstallCommand(nodeType string, rke2Version string, expectedInstallerSHA256 string) (string, error) {
 	installScriptURL, expectedInstallerSHA256, err := getRKE2InstallScriptURL(rke2Version, expectedInstallerSHA256)
 	if err != nil {

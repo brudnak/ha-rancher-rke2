@@ -206,17 +206,16 @@ func setupFirstServerNode(ip string, haOutputs TerraformOutputs, resolvedPlan *R
 		}
 		log.Printf("[setupFirstServerNode] Images directory created")
 
-		imagesURL := fmt.Sprintf("https://github.com/rancher/rke2/releases/download/%s/rke2-images.linux-amd64.tar.zst", rke2K8sVersion)
-		log.Printf("[setupFirstServerNode] Downloading images from %s (this may take a few minutes)...", imagesURL)
-		cmd = fmt.Sprintf("curl -sfL %s -o /tmp/rke2-images.tar.zst", imagesURL)
+		log.Printf("[setupFirstServerNode] Downloading and validating RKE2 images (this may take a few minutes)...")
+		cmd = buildRKE2ImagesDownloadCommand(rke2K8sVersion)
 		output, err = RunCommand(cmd, ip)
 		if err != nil {
-			log.Printf("[setupFirstServerNode] FAILED to download images: %v", err)
-			return fmt.Errorf("failed to download RKE2 images: %w", err)
+			log.Printf("[setupFirstServerNode] FAILED to download/validate images: %v", err)
+			return fmt.Errorf("failed to download/validate RKE2 images: %w", err)
 		}
-		log.Printf("[setupFirstServerNode] Images downloaded successfully")
+		log.Printf("[setupFirstServerNode] Images downloaded and checksum validated successfully")
 
-		cmd = "sudo mv /tmp/rke2-images.tar.zst /var/lib/rancher/rke2/agent/images/"
+		cmd = "sudo mv /tmp/rke2-images.linux-amd64.tar.zst /var/lib/rancher/rke2/agent/images/"
 		output, err = RunCommand(cmd, ip)
 		if err != nil {
 			log.Printf("[setupFirstServerNode] FAILED to move images: %v", err)
@@ -434,22 +433,21 @@ tls-san:
 			return fmt.Errorf("failed to create images directory: %w", err)
 		}
 
-		imagesURL := fmt.Sprintf("https://github.com/rancher/rke2/releases/download/%s/rke2-images.linux-amd64.tar.zst", rke2K8sVersion)
-		log.Printf("[setupAdditionalServerNode] Downloading images from %s...", imagesURL)
-		cmd = fmt.Sprintf("curl -sfL %s -o /tmp/rke2-images.tar.zst", imagesURL)
+		log.Printf("[setupAdditionalServerNode] Downloading and validating RKE2 images for %s...", ip)
+		cmd = buildRKE2ImagesDownloadCommand(rke2K8sVersion)
 		_, err = RunCommand(cmd, ip)
 		if err != nil {
-			log.Printf("[setupAdditionalServerNode] FAILED to download images: %v", err)
-			return fmt.Errorf("failed to download RKE2 images: %w", err)
+			log.Printf("[setupAdditionalServerNode] FAILED to download/validate images: %v", err)
+			return fmt.Errorf("failed to download/validate RKE2 images: %w", err)
 		}
 
-		cmd = "sudo mv /tmp/rke2-images.tar.zst /var/lib/rancher/rke2/agent/images/"
+		cmd = "sudo mv /tmp/rke2-images.linux-amd64.tar.zst /var/lib/rancher/rke2/agent/images/"
 		_, err = RunCommand(cmd, ip)
 		if err != nil {
 			log.Printf("[setupAdditionalServerNode] FAILED to move images: %v", err)
 			return fmt.Errorf("failed to move images: %w", err)
 		}
-		log.Printf("[setupAdditionalServerNode] Images pre-loaded successfully for %s", ip)
+		log.Printf("[setupAdditionalServerNode] Images pre-loaded and validated successfully for %s", ip)
 	}
 
 	dockerUsername := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME"))

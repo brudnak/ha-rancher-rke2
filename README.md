@@ -170,10 +170,38 @@ For available RKE2 Kubernetes versions, refer to: [RKE2 v1.32.X Release Notes](h
   - If you set them, the tool creates `/etc/rancher/rke2/registries.yaml` so RKE2 can authenticate to Docker Hub
   - If you leave them unset, the tool skips Docker Hub authentication
 - In `auto` mode, the tool prints a resolved plan for each HA and asks you to continue before provisioning starts
-- The project does not use `curl | sh` for the RKE2 installer anymore
-  - It downloads the versioned installer script
-  - It checks that script against the pinned SHA256
-  - It only runs the script if the checksum matches
+- All `curl` downloads are checksum-validated before use — no `curl | bash` patterns exist in this project
+
+### Supply chain security
+
+Every file downloaded over the network is verified against a known-good SHA256 before it is used or executed. This protects against compromised upstream releases (e.g. a tampered GitHub release asset) reaching your nodes.
+
+| Pattern | Location | Status |
+|---|---|---|
+| `curl \| bash` | — | Eliminated — no instances exist |
+| RKE2 installer curl | [preflight.go:302](terratest/preflight.go#L302) | Hardened — SHA256 validated twice (Go + bash) |
+| RKE2 images curl | [preflight.go:274](terratest/preflight.go#L274), [cluster_setup.go:210](terratest/cluster_setup.go#L210), [cluster_setup.go:437](terratest/cluster_setup.go#L437) | Hardened — SHA256 validated via official release checksum file |
+
+**RKE2 installer script** (`preflight.go`, `cluster_setup.go`)
+
+The installer is validated twice — once in Go before provisioning starts, and once in bash on the remote node:
+
+1. Before provisioning, the Go preflight downloads `install.sh` for the pinned RKE2 version and computes its SHA256 using `crypto/sha256`. If the hash does not match the expected value, provisioning is blocked entirely.
+2. On each node, the install command downloads the script to a temp file, runs `sha256sum -c` against the same hash, and refuses to execute if validation fails — with a clear `SECURITY ERROR` message in stderr.
+
+Where the expected hash comes from depends on mode:
+
+- **`manual` mode** — you supply `rke2.install_script_sha256` (single HA) or `rke2.install_script_sha256s` (multiple HAs) explicitly in your config. The tool checks your pinned value before any node is touched.
+- **`auto` mode** — the tool fetches the versioned `install.sh` at plan time, computes its SHA256, and stores it in the resolved plan. That computed hash is then used for both the Go preflight check and the per-node bash validation, so the same two-step process applies in both modes.
+
+**RKE2 images tarball** (`preflight.go`, `cluster_setup.go`)
+
+When `rke2.preload_images: true` is set, the image bundle is also validated before it is moved into place. This applies equally in `manual` and `auto` modes — in both cases the RKE2 version is known before the download starts (from your config in manual mode, from the resolved plan in auto mode), so the same validation runs regardless:
+
+1. The tarball (`rke2-images.linux-amd64.tar.zst`) is downloaded to `/tmp`.
+2. The official `sha256sum-amd64.txt` for that exact RKE2 release is downloaded from the same GitHub release page.
+3. `sha256sum -c` is run against the matching entry in that checksum file.
+4. If validation fails the tarball and checksum file are deleted and the script exits with a `SECURITY ERROR` — the corrupted file never reaches `/var/lib/rancher/rke2/agent/images/`.
 
 ### Auto Mode Example
 
