@@ -44,17 +44,7 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string, r
 
 	helmCommands := viper.GetStringSlice("rancher.helm_commands")
 	helmCommand := helmCommands[instanceNum-1]
-
-	if strings.Contains(helmCommand, "--set hostname=") {
-		helmCommand = strings.Replace(
-			helmCommand,
-			"--set hostname="+strings.Split(strings.Split(helmCommand, "--set hostname=")[1], " ")[0],
-			"--set hostname="+haOutputs.RancherURL,
-			1,
-		)
-	} else {
-		helmCommand = strings.TrimSpace(helmCommand) + fmt.Sprintf(" \\\n  --set hostname=%s", haOutputs.RancherURL)
-	}
+	helmCommand = rancherHelmCommandForHA(helmCommand, haOutputs.RancherURL)
 
 	CreateInstallScript(helmCommand, haDir)
 
@@ -139,6 +129,18 @@ func setupHAInstance(t *testing.T, instanceNum int, outputs map[string]string, r
 	log.Printf("HA %d Rancher URL: %s", instanceNum, clickableURL(haOutputs.RancherURL))
 
 	return nil
+}
+
+func rancherHelmCommandForHA(helmCommand, rancherURL string) string {
+	if strings.Contains(helmCommand, "--set hostname=") {
+		return strings.Replace(
+			helmCommand,
+			"--set hostname="+strings.Split(strings.Split(helmCommand, "--set hostname=")[1], " ")[0],
+			"--set hostname="+rancherURL,
+			1,
+		)
+	}
+	return strings.TrimSpace(helmCommand) + fmt.Sprintf(" \\\n  --set hostname=%s", rancherURL)
 }
 
 func setupFirstServerNode(ip string, haOutputs TerraformOutputs, resolvedPlan *RancherResolvedPlan) error {

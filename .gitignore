@@ -47,6 +47,8 @@ crash.log
 # Config files
 tool-config.yml
 *config
+!automation/render-tool-config/
+!automation/render-tool-config/**
 
 # Dynamic high-availability folders and files
 high-availability-*/*
@@ -67,6 +69,10 @@ high-availability-*/
 
 # Logs
 *.log
+
+# Automation outputs
+automation-output/
+signoff-plan.json
 
 # Local development files
 .env

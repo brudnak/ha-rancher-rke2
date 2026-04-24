@@ -1,0 +1,94 @@
+name: Plan Webhook Sign-Off
+
+on:
+  workflow_dispatch:
+    inputs:
+      rancher_version:
+        description: Target Rancher alpha, for example v2.14.1-alpha6. Leave blank to use latest alpha.
+        required: false
+        type: string
+      previous_rancher_version:
+        description: Previous Rancher release. Leave blank to resolve automatically.
+        required: false
+        type: string
+      webhook_image:
+        description: Candidate webhook image. Leave blank to use Docker Hub image from target build.yaml.
+        required: false
+        type: string
+      signing_policy:
+        description: Signing policy to apply.
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - required
+          - report-only
+          - skip
+  schedule:
+    - cron: "17 3,11,19 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build sign-off planner
+        run: go build -o "$RUNNER_TEMP/signoff-plan" ./automation/signoff-plan
+
+      - name: Generate sign-off plan
+        env:
+          INPUT_RANCHER_VERSION: ${{ github.event.inputs.rancher_version || '' }}
+          INPUT_PREVIOUS_RANCHER_VERSION: ${{ github.event.inputs.previous_rancher_version || '' }}
+          INPUT_WEBHOOK_IMAGE: ${{ github.event.inputs.webhook_image || '' }}
+          INPUT_SIGNING_POLICY: ${{ github.event.inputs.signing_policy || 'auto' }}
+        run: |
+          set -euo pipefail
+
+          args=()
+          if [ -n "$INPUT_RANCHER_VERSION" ]; then
+            args+=("-rancher-version" "$INPUT_RANCHER_VERSION")
+          else
+            args+=("-latest-alpha")
+          fi
+          if [ -n "$INPUT_PREVIOUS_RANCHER_VERSION" ]; then
+            args+=("-previous-rancher-version" "$INPUT_PREVIOUS_RANCHER_VERSION")
+          fi
+          if [ -n "$INPUT_WEBHOOK_IMAGE" ]; then
+            args+=("-webhook-image" "$INPUT_WEBHOOK_IMAGE")
+          fi
+          args+=("-signing-policy" "$INPUT_SIGNING_POLICY")
+          args+=("-run-id" "${{ github.run_id }}")
+          args+=("-output" "signoff-plan.json")
+
+          "$RUNNER_TEMP/signoff-plan" "${args[@]}"
+
+      - name: Write step summary
+        run: |
+          {
+            echo "## Webhook sign-off plan"
+            echo ""
+            echo '```json'
+            cat signoff-plan.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signoff-plan
+          path: signoff-plan.json

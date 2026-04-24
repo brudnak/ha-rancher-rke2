@@ -67,6 +67,7 @@ func TestShouldDropPrereleaseImageOverrides(t *testing.T) {
 func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T) {
 	commands := buildAutoHelmCommands(
 		1,
+		rancherHelmOperationInstall,
 		"optimus-rancher-alpha",
 		"2.14.1-alpha3",
 		"admin",
@@ -87,5 +88,57 @@ func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T)
 		if !strings.Contains(command, snippet) {
 			t.Fatalf("expected helm command to contain %q, got:\n%s", snippet, command)
 		}
+	}
+}
+
+func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
+	command := buildAutoHelmCommand(
+		rancherHelmOperationUpgrade,
+		"optimus-rancher-alpha",
+		"2.14.1-alpha6",
+		"admin",
+		"stgregistry.suse.com/rancher/rancher",
+		"v2.14.1-alpha6",
+		"stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha6",
+	)
+
+	expectedSnippets := []string{
+		"helm upgrade rancher optimus-rancher-alpha/rancher",
+		"--install",
+		"--version 2.14.1-alpha6",
+		"--set hostname=placeholder",
+		"--set rancherImage=stgregistry.suse.com/rancher/rancher",
+		"--set rancherImageTag=v2.14.1-alpha6",
+		"--set 'extraEnv[0].name=CATTLE_AGENT_IMAGE'",
+		"--set 'extraEnv[0].value=stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha6'",
+		"--wait",
+		"--wait-for-jobs",
+		"--timeout 30m",
+	}
+
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(command, snippet) {
+			t.Fatalf("expected helm command to contain %q, got:\n%s", snippet, command)
+		}
+	}
+}
+
+func TestRancherHelmCommandForHAReplacesPlaceholder(t *testing.T) {
+	command := buildAutoHelmCommand(
+		rancherHelmOperationUpgrade,
+		"rancher-alpha",
+		"2.14.1-alpha6",
+		"admin",
+		"",
+		"",
+		"",
+	)
+
+	command = rancherHelmCommandForHA(command, "rancher.example.com")
+	if !strings.Contains(command, "--set hostname=rancher.example.com") {
+		t.Fatalf("expected hostname replacement, got:\n%s", command)
+	}
+	if strings.Contains(command, "--set hostname=placeholder") {
+		t.Fatalf("expected placeholder to be replaced, got:\n%s", command)
 	}
 }

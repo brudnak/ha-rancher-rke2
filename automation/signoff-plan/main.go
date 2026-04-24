@@ -1,0 +1,610 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	rancherRepo      = "rancher/rancher"
+	defaultWebhook   = "rancher/rancher-webhook"
+	laneFreshAlpha   = "fresh-alpha"
+	laneUpgradeAlpha = "upgrade-alpha"
+	laneOldWebhook   = "previous-with-candidate-webhook"
+	laneLocalSuites  = "fresh-alpha-local-suites"
+)
+
+var (
+	alphaVersionRE   = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)-alpha(\d+)$`)
+	releaseVersionRE = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)$`)
+	webhookBuildRE   = regexp.MustCompile(`(?m)^\s*webhookVersion:\s*["']?([^"'\s]+)["']?\s*$`)
+)
+
+type plan struct {
+	TargetVersion        string        `json:"target_version"`
+	ReleaseLine          string        `json:"release_line"`
+	PreviousVersion      string        `json:"previous_version"`
+	TargetWebhookBuild   string        `json:"target_webhook_build"`
+	TargetWebhookTag     string        `json:"target_webhook_tag"`
+	PreviousWebhookBuild string        `json:"previous_webhook_build"`
+	PreviousWebhookTag   string        `json:"previous_webhook_tag"`
+	WebhookChanged       bool          `json:"webhook_changed"`
+	WebhookImage         string        `json:"webhook_image"`
+	SigningPolicyInput   string        `json:"signing_policy_input"`
+	SigningPolicy        string        `json:"signing_policy"`
+	SigningRegistry      string        `json:"signing_registry"`
+	RunID                string        `json:"run_id,omitempty"`
+	StateKeyRoot         string        `json:"state_key_root,omitempty"`
+	Lanes                []lane        `json:"lanes"`
+	SkippedLanes         []skippedLane `json:"skipped_lanes,omitempty"`
+	GeneratedAt          string        `json:"generated_at"`
+}
+
+type lane struct {
+	Name                 string `json:"name"`
+	InstallRancher       string `json:"install_rancher"`
+	UpgradeToRancher     string `json:"upgrade_to_rancher,omitempty"`
+	ProvisionDownstream  bool   `json:"provision_downstream"`
+	WebhookOverrideImage string `json:"webhook_override_image,omitempty"`
+	TerraformStateKey    string `json:"terraform_state_key,omitempty"`
+	AWSPrefix            string `json:"aws_prefix,omitempty"`
+	Description          string `json:"description"`
+}
+
+type skippedLane struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+type semver struct {
+	Major int
+	Minor int
+	Patch int
+	Alpha int
+	Raw   string
+}
+
+type release struct {
+	TagName     string `json:"tag_name"`
+	Prerelease  bool   `json:"prerelease"`
+	PublishedAt string `json:"published_at"`
+}
+
+type githubClient struct {
+	token      string
+	httpClient *http.Client
+	apiBaseURL string
+	rawBaseURL string
+}
+
+func main() {
+	var targetVersion string
+	var previousVersion string
+	var webhookImage string
+	var signingPolicy string
+	var outputPath string
+	var runID string
+	var stateKeyRoot string
+	var latestAlpha bool
+
+	flag.StringVar(&targetVersion, "rancher-version", "", "target Rancher alpha tag, for example v2.14.1-alpha6")
+	flag.StringVar(&previousVersion, "previous-rancher-version", "", "previous Rancher release tag; resolved automatically when omitted")
+	flag.StringVar(&webhookImage, "webhook-image", "", "candidate webhook image; defaults to docker.io/rancher/rancher-webhook:<target webhook tag>")
+	flag.StringVar(&signingPolicy, "signing-policy", "auto", "required, report-only, skip, or auto")
+	flag.StringVar(&outputPath, "output", "", "optional JSON output path")
+	flag.StringVar(&runID, "run-id", os.Getenv("GITHUB_RUN_ID"), "workflow run id used to generate per-lane Terraform state keys")
+	flag.StringVar(&stateKeyRoot, "state-key-root", "ha-rancher-rke2/signoff", "root prefix for generated Terraform state keys")
+	flag.BoolVar(&latestAlpha, "latest-alpha", false, "resolve the latest Rancher alpha from GitHub releases")
+	flag.Parse()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	client := githubClient{
+		token: os.Getenv("GH_TOKEN"),
+		httpClient: &http.Client{
+			Timeout: 20 * time.Second,
+		},
+	}
+
+	if latestAlpha {
+		version, err := client.latestAlpha(ctx)
+		if err != nil {
+			fatalf("resolve latest alpha: %v", err)
+		}
+		targetVersion = version
+	}
+
+	if targetVersion == "" {
+		fatalf("set -rancher-version or -latest-alpha")
+	}
+
+	p, err := buildPlan(ctx, client, targetVersion, previousVersion, webhookImage, signingPolicy, runID, stateKeyRoot)
+	if err != nil {
+		fatalf("build sign-off plan: %v", err)
+	}
+
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		fatalf("render plan JSON: %v", err)
+	}
+	data = append(data, '\n')
+
+	if outputPath != "" {
+		if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+			fatalf("write %s: %v", outputPath, err)
+		}
+	}
+
+	if _, err := os.Stdout.Write(data); err != nil {
+		fatalf("write stdout: %v", err)
+	}
+}
+
+func buildPlan(ctx context.Context, client githubClient, targetVersion, previousVersion, webhookImage, signingPolicyInput, runID, stateKeyRoot string) (plan, error) {
+	target, err := parseAlphaVersion(targetVersion)
+	if err != nil {
+		return plan{}, err
+	}
+	targetVersion = normalizeTag(targetVersion)
+
+	if previousVersion == "" {
+		resolved, err := client.resolvePreviousRelease(ctx, target)
+		if err != nil {
+			return plan{}, err
+		}
+		previousVersion = resolved
+	}
+	previousVersion = normalizeTag(previousVersion)
+	if _, err := parseReleaseVersion(previousVersion); err != nil {
+		return plan{}, fmt.Errorf("previous Rancher version must be a release tag like v2.14.0: %w", err)
+	}
+
+	targetBuild, err := client.webhookBuild(ctx, targetVersion)
+	if err != nil {
+		return plan{}, fmt.Errorf("target %s: %w", targetVersion, err)
+	}
+	previousBuild, err := client.webhookBuild(ctx, previousVersion)
+	if err != nil {
+		return plan{}, fmt.Errorf("previous %s: %w", previousVersion, err)
+	}
+
+	targetWebhookTag, err := webhookTagFromBuild(targetBuild)
+	if err != nil {
+		return plan{}, fmt.Errorf("target webhook build %q: %w", targetBuild, err)
+	}
+	previousWebhookTag, err := webhookTagFromBuild(previousBuild)
+	if err != nil {
+		return plan{}, fmt.Errorf("previous webhook build %q: %w", previousBuild, err)
+	}
+
+	if strings.TrimSpace(webhookImage) == "" {
+		webhookImage = fmt.Sprintf("docker.io/%s:%s", defaultWebhook, targetWebhookTag)
+	}
+	registry, _, _, err := parseImage(webhookImage)
+	if err != nil {
+		return plan{}, err
+	}
+	resolvedPolicy, err := resolveSigningPolicy(signingPolicyInput, registry)
+	if err != nil {
+		return plan{}, err
+	}
+
+	webhookChanged := targetWebhookTag != previousWebhookTag
+	lanes := []lane{
+		{
+			Name:                laneFreshAlpha,
+			InstallRancher:      targetVersion,
+			ProvisionDownstream: true,
+			Description:         fmt.Sprintf("Fresh install %s, provision downstream Linode, run webhook suite.", targetVersion),
+		},
+		{
+			Name:                laneUpgradeAlpha,
+			InstallRancher:      previousVersion,
+			UpgradeToRancher:    targetVersion,
+			ProvisionDownstream: true,
+			Description:         fmt.Sprintf("Install %s, provision downstream Linode, upgrade to %s, run webhook suite.", previousVersion, targetVersion),
+		},
+		{
+			Name:                laneLocalSuites,
+			InstallRancher:      targetVersion,
+			ProvisionDownstream: false,
+			Description:         fmt.Sprintf("Fresh install %s, run local-cluster suites such as frameworks regression and VAI enabled.", targetVersion),
+		},
+	}
+
+	var skipped []skippedLane
+	if webhookChanged {
+		lanes = append(lanes, lane{
+			Name:                 laneOldWebhook,
+			InstallRancher:       previousVersion,
+			ProvisionDownstream:  true,
+			WebhookOverrideImage: webhookImage,
+			Description:          fmt.Sprintf("Install %s, provision downstream Linode, override local and downstream webhook to %s, run webhook suite.", previousVersion, webhookImage),
+		})
+	} else {
+		skipped = append(skipped, skippedLane{
+			Name:   laneOldWebhook,
+			Reason: fmt.Sprintf("Target alpha reuses previous Rancher webhook tag %s; overriding the old Rancher to the same webhook adds no coverage.", targetWebhookTag),
+		})
+	}
+	applyLaneRuntimeFields(lanes, targetVersion, fmt.Sprintf("v%d.%d", target.Major, target.Minor), runID, stateKeyRoot)
+
+	return plan{
+		TargetVersion:        targetVersion,
+		ReleaseLine:          fmt.Sprintf("v%d.%d", target.Major, target.Minor),
+		PreviousVersion:      previousVersion,
+		TargetWebhookBuild:   targetBuild,
+		TargetWebhookTag:     targetWebhookTag,
+		PreviousWebhookBuild: previousBuild,
+		PreviousWebhookTag:   previousWebhookTag,
+		WebhookChanged:       webhookChanged,
+		WebhookImage:         webhookImage,
+		SigningPolicyInput:   normalizePolicyInput(signingPolicyInput),
+		SigningPolicy:        resolvedPolicy,
+		SigningRegistry:      registry,
+		RunID:                strings.TrimSpace(runID),
+		StateKeyRoot:         strings.Trim(strings.TrimSpace(stateKeyRoot), "/"),
+		Lanes:                lanes,
+		SkippedLanes:         skipped,
+		GeneratedAt:          time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func applyLaneRuntimeFields(lanes []lane, targetVersion, releaseLine, runID, stateKeyRoot string) {
+	runID = strings.TrimSpace(runID)
+	stateKeyRoot = strings.Trim(strings.TrimSpace(stateKeyRoot), "/")
+	for i := range lanes {
+		lanes[i].AWSPrefix = buildLaneAWSPrefix(runID, lanes[i].Name)
+		if runID != "" && stateKeyRoot != "" {
+			lanes[i].TerraformStateKey = buildTerraformStateKey(stateKeyRoot, releaseLine, targetVersion, runID, lanes[i].Name)
+		}
+	}
+}
+
+func buildTerraformStateKey(root, releaseLine, targetVersion, runID, laneName string) string {
+	parts := []string{
+		strings.Trim(root, "/"),
+		sanitizeStateKeyPart(releaseLine),
+		sanitizeStateKeyPart(targetVersion),
+		sanitizeStateKeyPart(runID),
+		sanitizeStateKeyPart(laneName),
+		"terraform.tfstate",
+	}
+	return strings.Join(parts, "/")
+}
+
+func buildLaneAWSPrefix(runID, laneName string) string {
+	laneCode := map[string]string{
+		laneFreshAlpha:   "fa",
+		laneUpgradeAlpha: "ua",
+		laneOldWebhook:   "ow",
+		laneLocalSuites:  "ls",
+	}[laneName]
+	if laneCode == "" {
+		laneCode = "ln"
+	}
+	runID = compactRunID(runID)
+	if runID == "" {
+		return "local-" + laneCode
+	}
+	return "gha-" + runID + "-" + laneCode
+}
+
+func compactRunID(runID string) string {
+	runID = sanitizeAWSNamePart(runID)
+	if len(runID) <= 8 {
+		return runID
+	}
+	return runID[len(runID)-8:]
+}
+
+func sanitizeStateKeyPart(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "/")
+	value = strings.ReplaceAll(value, " ", "-")
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func sanitizeAWSNamePart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func (c githubClient) latestAlpha(ctx context.Context) (string, error) {
+	releases, err := c.releases(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	for _, release := range releases {
+		if release.Prerelease && alphaVersionRE.MatchString(release.TagName) {
+			return normalizeTag(release.TagName), nil
+		}
+	}
+
+	return "", fmt.Errorf("no alpha release found in recent %s releases", rancherRepo)
+}
+
+func (c githubClient) resolvePreviousRelease(ctx context.Context, target semver) (string, error) {
+	if target.Patch > 0 {
+		candidate := fmt.Sprintf("v%d.%d.%d", target.Major, target.Minor, target.Patch-1)
+		if ok, err := c.releaseExists(ctx, candidate); err != nil {
+			return "", err
+		} else if ok {
+			return candidate, nil
+		}
+	}
+
+	releases, err := c.releases(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	var candidates []semver
+	for _, release := range releases {
+		parsed, err := parseReleaseVersion(release.TagName)
+		if err != nil {
+			continue
+		}
+		if parsed.Major != target.Major {
+			continue
+		}
+		if parsed.Minor > target.Minor || (parsed.Minor == target.Minor && parsed.Patch >= target.Patch) {
+			continue
+		}
+		candidates = append(candidates, parsed)
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no previous Rancher release found for %s", target.Raw)
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Minor != candidates[j].Minor {
+			return candidates[i].Minor > candidates[j].Minor
+		}
+		return candidates[i].Patch > candidates[j].Patch
+	})
+
+	return normalizeTag(candidates[0].Raw), nil
+}
+
+func (c githubClient) releaseExists(ctx context.Context, tag string) (bool, error) {
+	url := fmt.Sprintf("%s/repos/%s/releases/tags/%s", c.apiBase(), rancherRepo, tag)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+	c.addHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return false, fmt.Errorf("GitHub release lookup failed for %s: %s: %s", tag, resp.Status, strings.TrimSpace(string(body)))
+	}
+	return true, nil
+}
+
+func (c githubClient) releases(ctx context.Context) ([]release, error) {
+	url := fmt.Sprintf("%s/repos/%s/releases?per_page=100", c.apiBase(), rancherRepo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("GitHub releases request failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var releases []release
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return nil, err
+	}
+	return releases, nil
+}
+
+func (c githubClient) webhookBuild(ctx context.Context, tag string) (string, error) {
+	url := fmt.Sprintf("%s/%s/%s/build.yaml", c.rawBase(), rancherRepo, tag)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	c.addHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("build.yaml request failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return "", err
+	}
+	return parseWebhookBuild(string(body))
+}
+
+func (c githubClient) addHeaders(req *http.Request) {
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "ha-rancher-rke2-signoff-plan")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+}
+
+func (c githubClient) apiBase() string {
+	if c.apiBaseURL != "" {
+		return strings.TrimRight(c.apiBaseURL, "/")
+	}
+	return "https://api.github.com"
+}
+
+func (c githubClient) rawBase() string {
+	if c.rawBaseURL != "" {
+		return strings.TrimRight(c.rawBaseURL, "/")
+	}
+	return "https://raw.githubusercontent.com"
+}
+
+func parseWebhookBuild(buildYAML string) (string, error) {
+	match := webhookBuildRE.FindStringSubmatch(buildYAML)
+	if len(match) != 2 {
+		return "", errors.New("webhookVersion not found in build.yaml")
+	}
+	return strings.TrimSpace(match[1]), nil
+}
+
+func webhookTagFromBuild(build string) (string, error) {
+	build = strings.TrimSpace(build)
+	if build == "" {
+		return "", errors.New("empty webhook build")
+	}
+	idx := strings.LastIndex(build, "+up")
+	if idx < 0 || idx+3 >= len(build) {
+		return "", fmt.Errorf("expected build format like 109.0.1+up0.10.1-rc.5")
+	}
+	version := strings.TrimSpace(build[idx+3:])
+	if version == "" {
+		return "", fmt.Errorf("empty +up version in %q", build)
+	}
+	return "v" + strings.TrimPrefix(version, "v"), nil
+}
+
+func parseAlphaVersion(value string) (semver, error) {
+	match := alphaVersionRE.FindStringSubmatch(strings.TrimSpace(value))
+	if len(match) != 5 {
+		return semver{}, fmt.Errorf("target Rancher version must be an alpha tag like v2.14.1-alpha6")
+	}
+	return parseVersionParts(value, match)
+}
+
+func parseReleaseVersion(value string) (semver, error) {
+	match := releaseVersionRE.FindStringSubmatch(strings.TrimSpace(value))
+	if len(match) != 4 {
+		return semver{}, fmt.Errorf("not a release version: %s", value)
+	}
+	return parseVersionParts(value, match)
+}
+
+func parseVersionParts(raw string, match []string) (semver, error) {
+	major, err := strconv.Atoi(match[1])
+	if err != nil {
+		return semver{}, err
+	}
+	minor, err := strconv.Atoi(match[2])
+	if err != nil {
+		return semver{}, err
+	}
+	patch, err := strconv.Atoi(match[3])
+	if err != nil {
+		return semver{}, err
+	}
+	alpha := 0
+	if len(match) > 4 {
+		alpha, err = strconv.Atoi(match[4])
+		if err != nil {
+			return semver{}, err
+		}
+	}
+	return semver{Major: major, Minor: minor, Patch: patch, Alpha: alpha, Raw: normalizeTag(raw)}, nil
+}
+
+func parseImage(image string) (registry, repository, tag string, err error) {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return "", "", "", errors.New("webhook image must not be empty")
+	}
+
+	slash := strings.IndexByte(image, '/')
+	if slash < 0 {
+		return "", "", "", fmt.Errorf("webhook image must include a registry and repository: %s", image)
+	}
+	registry = image[:slash]
+	remainder := image[slash+1:]
+	colon := strings.LastIndexByte(remainder, ':')
+	if colon < 0 || colon == len(remainder)-1 {
+		return "", "", "", fmt.Errorf("webhook image must include a tag: %s", image)
+	}
+	repository = remainder[:colon]
+	tag = remainder[colon+1:]
+	if registry == "" || repository == "" || tag == "" {
+		return "", "", "", fmt.Errorf("invalid webhook image: %s", image)
+	}
+	return registry, repository, tag, nil
+}
+
+func resolveSigningPolicy(input, registry string) (string, error) {
+	input = normalizePolicyInput(input)
+	switch input {
+	case "required", "report-only", "skip":
+		return input, nil
+	case "auto":
+		switch registry {
+		case "registry.suse.com", "stgregistry.suse.com":
+			return "required", nil
+		case "docker.io":
+			return "report-only", nil
+		default:
+			return "report-only", nil
+		}
+	default:
+		return "", fmt.Errorf("unsupported signing policy %q", input)
+	}
+}
+
+func normalizePolicyInput(input string) string {
+	input = strings.ToLower(strings.TrimSpace(input))
+	if input == "" {
+		return "auto"
+	}
+	return input
+}
+
+func normalizeTag(version string) string {
+	version = strings.TrimSpace(version)
+	return "v" + strings.TrimPrefix(version, "v")
+}
+
+func fatalf(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}

@@ -2,6 +2,8 @@
 
 Deploy Rancher High Availability (HA) clusters on AWS using RKE2 with automated setup and secure configuration.
 
+For the planned scheduled GitHub Actions alpha/webhook sign-off automation, see [docs/README.md](docs/README.md).
+
 ## Key Features
 
 - **No Cert Manager required** — SSL is handled via AWS ACM
@@ -44,7 +46,7 @@ Place `tool-config.yml` at the project root:
 Run the following command to deploy the infrastructure:
 
 ```bash
-go test -v -run TestHaSetup -timeout 60m ./terratest
+go test -v -run '^TestHaSetup$' -timeout 60m ./terratest
 ```
 
 This command will:
@@ -72,7 +74,7 @@ Installation uses ALB with ACM certificates for secure HTTPS access without requ
 To destroy all resources:
 
 ```bash
-go test -v -run TestHACleanup -timeout 20m ./terratest
+go test -v -run '^TestHACleanup$' -timeout 30m ./terratest
 ```
 
 This will:
@@ -86,7 +88,7 @@ This will:
 To open the optional local-only Rancher control panel:
 
 ```bash
-go test -v -run TestHAControlPanel -timeout 0 -count=1 ./terratest
+go test -v -run '^TestHAControlPanel$' -timeout 0 -count=1 ./terratest
 ```
 
 This starts a browser-based control panel bound to `127.0.0.1` only. It is separate from setup and cleanup, so you can open it any time after provisioning, close it when you're done, and start it again later to re-check cluster health.
@@ -94,6 +96,38 @@ This starts a browser-based control panel bound to `127.0.0.1` only. It is separ
 `-count=1` is recommended here so `go test` does not reuse a cached prior success and immediately exit instead of starting a fresh panel.
 
 If you prefer using the IDE run button, `TestHAControlPanel` is also available alongside `TestHaSetup` and `TestHACleanup` in [terratest/ha_test.go](/Users/andrewbrudnak/github.com/brudnak/ha-rancher-rke2/terratest/ha_test.go).
+
+## Exact Test Runs
+
+Live infrastructure tests are guarded on purpose. They only run when the `-run`
+pattern is exactly the test name, or an anchored regex for only that test. This
+prevents a broad package run such as `go test ./terratest` or a generic IDE play
+button from accidentally creating or destroying cloud resources.
+
+Use these commands for the normal local lifecycle:
+
+```bash
+# Create Rancher HA infrastructure
+go test -v -run '^TestHaSetup$' -timeout 60m ./terratest
+
+# Wait until Rancher and rancher-webhook are healthy
+go test -v -run '^TestHAWaitReady$' -timeout 35m ./terratest
+
+# Open the local control panel
+go test -v -run '^TestHAControlPanel$' -timeout 0 -count=1 ./terratest
+
+# Destroy AWS infrastructure
+go test -v -run '^TestHACleanup$' -timeout 30m ./terratest
+```
+
+For GoLand, create or edit a Go Test run configuration and set:
+
+- **Test kind / Run kind:** `Package`, `Directory`, or `Pattern` is fine if the **Pattern** is exact.
+- **Package path:** `github.com/brudnak/ha-rancher-rke2/terratest`
+- **Pattern:** one exact pattern, for example `^TestHACleanup$` or `^TestHAControlPanel$`
+- **Go tool arguments / Additional go test arguments:** add `-timeout 30m` for cleanup, or `-timeout 0 -count=1` for the control panel
+
+If GoLand shows `Test ignored` with a message like `uses live infrastructure; run it explicitly`, the run configuration is using a broader pattern. Change the pattern to the anchored command above.
 
 The control panel currently provides:
 
