@@ -43,7 +43,7 @@ func initAWSClients() error {
 			credentials.NewStaticCredentialsProvider(
 				os.Getenv("AWS_ACCESS_KEY_ID"),
 				os.Getenv("AWS_SECRET_ACCESS_KEY"),
-				"",
+				os.Getenv("AWS_SESSION_TOKEN"),
 			),
 		),
 	)
@@ -368,7 +368,7 @@ func lookupEC2OnDemandHourlyPriceUSD(region, instanceType string) (float64, erro
 			credentials.NewStaticCredentialsProvider(
 				os.Getenv("AWS_ACCESS_KEY_ID"),
 				os.Getenv("AWS_SECRET_ACCESS_KEY"),
-				"",
+				os.Getenv("AWS_SESSION_TOKEN"),
 			),
 		),
 	)
@@ -408,7 +408,7 @@ func lookupEBSMonthlyPricePerGiBUSD(region, volumeType string) (float64, error) 
 			credentials.NewStaticCredentialsProvider(
 				os.Getenv("AWS_ACCESS_KEY_ID"),
 				os.Getenv("AWS_SECRET_ACCESS_KEY"),
-				"",
+				os.Getenv("AWS_SESSION_TOKEN"),
 			),
 		),
 	)
