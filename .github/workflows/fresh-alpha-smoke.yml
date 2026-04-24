@@ -1,0 +1,481 @@
+name: Rancher Alpha Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      rancher_version:
+        description: Target Rancher alpha, for example v2.14.1-alpha6.
+        required: true
+        type: string
+      lane:
+        description: Validation lane to run.
+        required: true
+        default: fresh-alpha
+        type: choice
+        options:
+          - fresh-alpha
+          - upgrade-alpha
+          - previous-with-candidate-webhook
+          - fresh-alpha-local-suites
+      previous_rancher_version:
+        description: Previous Rancher release. Leave blank to resolve automatically.
+        required: false
+        type: string
+      webhook_image:
+        description: Candidate webhook image. Leave blank to use Docker Hub image from target build.yaml.
+        required: false
+        type: string
+      signing_policy:
+        description: Signing policy to include in the plan.
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - required
+          - report-only
+          - skip
+      keep_infra_on_failure:
+        description: Skip cleanup if setup fails. Use only for manual debugging.
+        required: true
+        default: false
+        type: boolean
+      run_rancher_tests:
+        description: Clone rancher/tests and run the lane's test suites after the lane is ready.
+        required: true
+        default: false
+        type: boolean
+      rancher_tests_ref:
+        description: rancher/tests ref to clone. Defaults to main.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: fresh-alpha-smoke
+  cancel-in-progress: false
+
+jobs:
+  fresh-alpha:
+    runs-on: ubuntu-latest
+    environment: automation-smoke
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_STATE_LOCK_TABLE: ${{ vars.TF_STATE_LOCK_TABLE }}
+      TF_STATE_REGION: ${{ vars.TF_STATE_REGION }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_VPC: ${{ vars.AWS_VPC }}
+      AWS_SUBNET_A: ${{ vars.AWS_SUBNET_A }}
+      AWS_SUBNET_B: ${{ vars.AWS_SUBNET_B }}
+      AWS_SUBNET_C: ${{ vars.AWS_SUBNET_C }}
+      AWS_AMI: ${{ vars.AWS_AMI }}
+      AWS_SUBNET_ID: ${{ vars.AWS_SUBNET_ID }}
+      AWS_SECURITY_GROUP_ID: ${{ vars.AWS_SECURITY_GROUP_ID }}
+      AWS_PEM_KEY_NAME: ${{ vars.AWS_PEM_KEY_NAME }}
+      AWS_ROUTE53_FQDN: ${{ vars.AWS_ROUTE53_FQDN }}
+      RANCHER_BOOTSTRAP_PASSWORD: ${{ secrets.RANCHER_BOOTSTRAP_PASSWORD }}
+      LINODE_TOKEN: ${{ secrets.LINODE_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+      RANCHER_TESTS_REF: ${{ vars.RANCHER_TESTS_REF }}
+      RANCHER_TEST_SUITE_SETTLE_SECONDS: ${{ vars.RANCHER_TEST_SUITE_SETTLE_SECONDS }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_AUTOMATION_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Mask runtime secrets
+        run: |
+          set -euo pipefail
+          for value in \
+            "$RANCHER_BOOTSTRAP_PASSWORD" \
+            "$LINODE_TOKEN" \
+            "$DOCKERHUB_PASSWORD"; do
+            if [ -n "$value" ]; then
+              echo "::add-mask::$value"
+            fi
+          done
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_wrapper: false
+
+      - name: Install kubectl and helm
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y apt-transport-https ca-certificates curl gpg
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+          curl -fsSL https://packages.buildkite.com/helm-linux/helm-debian/gpgkey | sudo gpg --dearmor -o /etc/apt/keyrings/helm.gpg
+          echo 'deb [signed-by=/etc/apt/keyrings/helm.gpg] https://packages.buildkite.com/helm-linux/helm-debian/any/ any main' | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+          sudo apt-get update
+          sudo apt-get install -y kubectl helm
+
+      - name: Build automation tools
+        run: |
+          go build -o "$RUNNER_TEMP/signoff-plan" ./automation/signoff-plan
+          go build -o "$RUNNER_TEMP/render-tool-config" ./automation/render-tool-config
+          go build -o "$RUNNER_TEMP/render-signoff-report" ./automation/render-signoff-report
+
+      - name: Generate sign-off plan
+        env:
+          INPUT_PREVIOUS_RANCHER_VERSION: ${{ github.event.inputs.previous_rancher_version || '' }}
+          INPUT_WEBHOOK_IMAGE: ${{ github.event.inputs.webhook_image || '' }}
+        run: |
+          set -euo pipefail
+
+          args=(
+            "-rancher-version" "${{ inputs.rancher_version }}"
+            "-signing-policy" "${{ inputs.signing_policy }}"
+            "-run-id" "${{ github.run_id }}"
+            "-output" "signoff-plan.json"
+          )
+          if [ -n "$INPUT_PREVIOUS_RANCHER_VERSION" ]; then
+            args+=("-previous-rancher-version" "$INPUT_PREVIOUS_RANCHER_VERSION")
+          fi
+          if [ -n "$INPUT_WEBHOOK_IMAGE" ]; then
+            args+=("-webhook-image" "$INPUT_WEBHOOK_IMAGE")
+          fi
+
+          "$RUNNER_TEMP/signoff-plan" "${args[@]}"
+
+      - name: Render lane config
+        run: |
+          "$RUNNER_TEMP/render-tool-config" \
+            -plan signoff-plan.json \
+            -lane "${{ inputs.lane }}" \
+            -output tool-config.yml \
+            -env-output lane.env
+          cat lane.env >> "$GITHUB_ENV"
+
+      - name: Validate generated config
+        run: |
+          test -s tool-config.yml
+          test -n "${TF_STATE_KEY:-}"
+          echo "TF state key: ${TF_STATE_KEY}"
+          echo "Rancher upgrade version: ${RANCHER_UPGRADE_VERSION:-none}"
+
+      - name: Run lane setup
+        id: setup
+        run: go test -v -run TestHaSetup -timeout 90m ./terratest
+
+      - name: Wait for lane readiness
+        id: ready
+        run: go test -v -run TestHAWaitReady -timeout 35m ./terratest
+
+      - name: Export local suite env
+        id: local_suite_env
+        if: ${{ inputs.lane == 'fresh-alpha-local-suites' }}
+        run: go test -v -run TestHAWriteLocalSuiteEnv -timeout 5m ./terratest
+
+      - name: Validate Linode token
+        if: ${{ inputs.lane != 'fresh-alpha-local-suites' }}
+        run: test -n "${LINODE_TOKEN:-}"
+
+      - name: Provision downstream Linode K3s
+        id: downstream
+        if: ${{ inputs.lane != 'fresh-alpha-local-suites' }}
+        run: go test -v -run TestHAProvisionLinodeDownstream -timeout 55m ./terratest
+
+      - name: Override local webhook image
+        id: local_webhook
+        if: ${{ inputs.lane == 'previous-with-candidate-webhook' }}
+        run: go test -v -run TestHAOverrideLocalWebhook -timeout 30m ./terratest
+
+      - name: Override downstream webhook image
+        id: downstream_webhook
+        if: ${{ inputs.lane == 'previous-with-candidate-webhook' }}
+        run: go test -v -run TestHAOverrideDownstreamWebhook -timeout 20m ./terratest
+
+      - name: Run Rancher upgrade
+        id: upgrade
+        if: ${{ inputs.lane == 'upgrade-alpha' }}
+        run: go test -v -run TestHAUpgradeRancher -timeout 45m ./terratest
+
+      - name: Run Rancher tests
+        id: rancher_tests
+        if: ${{ inputs.run_rancher_tests == true }}
+        env:
+          INPUT_RANCHER_TESTS_REF: ${{ github.event.inputs.rancher_tests_ref || '' }}
+        run: |
+          set -euo pipefail
+
+          env_file="automation-output/downstream-ha-1.env"
+          suites=("charts-webhook")
+          if [ "${{ inputs.lane }}" = "fresh-alpha-local-suites" ]; then
+            env_file="automation-output/local-suite-ha-1.env"
+            version="${{ inputs.rancher_version }}"
+            version="${version#v}"
+            IFS='.' read -r rancher_major rancher_minor _ <<< "$version"
+            suites=("frameworks-reg")
+            if [ "$rancher_major" -eq 2 ] && [ "$rancher_minor" -le 11 ]; then
+              suites+=("vai-disabled")
+            else
+              suites+=("vai-enabled")
+            fi
+            if [ "$rancher_major" -gt 2 ] || { [ "$rancher_major" -eq 2 ] && [ "$rancher_minor" -ge 14 ]; }; then
+              suites+=("webhook-security-settings")
+            fi
+          fi
+          if [ ! -s "$env_file" ]; then
+            echo "Expected suite env file $env_file"
+            exit 1
+          fi
+
+          set -a
+          # shellcheck disable=SC1090
+          . "$env_file"
+          set +a
+          echo "::add-mask::$RANCHER_ADMIN_TOKEN"
+
+          mkdir -p automation-output
+          mkdir -p test-results
+
+          go install gotest.tools/gotestsum@latest
+          go_bin="$(go env GOPATH)/bin"
+          export PATH="$go_bin:$PATH"
+          echo "$go_bin" >> "$GITHUB_PATH"
+
+          tests_ref="${INPUT_RANCHER_TESTS_REF:-${RANCHER_TESTS_REF:-main}}"
+          tests_dir="$RUNNER_TEMP/rancher-tests"
+          git clone --depth 1 --branch "$tests_ref" https://github.com/rancher/tests.git "$tests_dir"
+
+          config_path="$RUNNER_TEMP/cattle-config.yaml"
+          cat > "$config_path" <<EOF
+          rancher:
+            host: "$RANCHER_HOST"
+            adminToken: "$RANCHER_ADMIN_TOKEN"
+            cleanup: true
+            insecure: true
+            clusterName: "$CLUSTER_NAME"
+          EOF
+          chmod 600 "$config_path"
+
+          results_json="automation-output/rancher-test-results.json"
+          results_tmp="$(mktemp)"
+          printf '[]' > "$results_tmp"
+
+          append_result() {
+            suite="$1"
+            package="$2"
+            test_run="$3"
+            junit="$4"
+            conclusion="$5"
+            tmp="$(mktemp)"
+            jq \
+              --arg suite "$suite" \
+              --arg package "$package" \
+              --arg test_run "$test_run" \
+              --arg junit "$junit" \
+              --arg conclusion "$conclusion" \
+              '. + [{suite: $suite, package: $package, test_run: $test_run, junit: $junit, conclusion: $conclusion}]' \
+              "$results_tmp" > "$tmp"
+            mv "$tmp" "$results_tmp"
+          }
+
+          failed=0
+          suite_settle_seconds="${RANCHER_TEST_SUITE_SETTLE_SECONDS:-30}"
+          suite_index=0
+
+          for suite in "${suites[@]}"; do
+            suite_index=$((suite_index + 1))
+            if [ "$suite_index" -gt 1 ] && [ "$suite_settle_seconds" -gt 0 ]; then
+              echo "Settling for ${suite_settle_seconds}s before running $suite"
+              sleep "$suite_settle_seconds"
+            fi
+
+            case "$suite" in
+              charts-webhook)
+                package="./validation/charts"
+                test_run="TestWebhookTestSuite"
+                tags="validation,infra.any,cluster.any"
+                timeout_args=()
+                ;;
+              frameworks-reg)
+                package="./validation/configmaps"
+                test_run="TestConfigMapTestSuite"
+                tags="validation,infra.any,cluster.any"
+                timeout_args=()
+                ;;
+              vai-enabled)
+                package="./validation/steve/vai"
+                test_run="TestVaiTestSuite/TestVaiEnabled"
+                tags="validation,infra.any,cluster.any,extended"
+                timeout_args=("-timeout" "30m")
+                ;;
+              vai-disabled)
+                package="./validation/steve/vai"
+                test_run="TestVaiTestSuite/TestVaiDisabled"
+                tags="validation,infra.any,cluster.any,extended"
+                timeout_args=("-timeout" "30m")
+                ;;
+              webhook-security-settings)
+                package="./validation/charts"
+                test_run="TestWebhookSecuritySettingsTestSuite"
+                tags="validation,infra.any,cluster.any"
+                timeout_args=()
+                ;;
+              *)
+                echo "Unknown suite $suite"
+                exit 1
+                ;;
+            esac
+
+            junit="$GITHUB_WORKSPACE/test-results/${suite}.xml"
+            echo "Running rancher/tests suite $suite against cluster $CLUSTER_NAME"
+            set +e
+            (
+              cd "$tests_dir"
+              CATTLE_TEST_CONFIG="$config_path" gotestsum \
+                --format standard-verbose \
+                --junitfile "$junit" \
+                -- \
+                -v "${timeout_args[@]}" -tags="$tags" "$package" -run "$test_run"
+            )
+            exit_code=$?
+            set -e
+
+            conclusion="success"
+            if [ "$exit_code" -ne 0 ]; then
+              conclusion="failure"
+              failed=1
+            fi
+            append_result "$suite" "$package" "$test_run" "test-results/${suite}.xml" "$conclusion"
+
+            if [ "$suite" = "frameworks-reg" ]; then
+              if [ "$suite_settle_seconds" -gt 0 ]; then
+                echo "Settling for ${suite_settle_seconds}s before frameworks-reg schemas"
+                sleep "$suite_settle_seconds"
+              fi
+              package="./validation/schemas"
+              test_run="TestSchemaChangesTestSuite"
+              junit="$GITHUB_WORKSPACE/test-results/frameworks-reg-schemas.xml"
+              set +e
+              (
+                cd "$tests_dir"
+                CATTLE_TEST_CONFIG="$config_path" gotestsum \
+                  --format standard-verbose \
+                  --junitfile "$junit" \
+                  -- \
+                  -v -tags="$tags" "$package" -run "$test_run"
+              )
+              exit_code=$?
+              set -e
+              conclusion="success"
+              if [ "$exit_code" -ne 0 ]; then
+                conclusion="failure"
+                failed=1
+              fi
+              append_result "$suite" "$package" "$test_run" "test-results/frameworks-reg-schemas.xml" "$conclusion"
+
+              if [ "$suite_settle_seconds" -gt 0 ]; then
+                echo "Settling for ${suite_settle_seconds}s before frameworks-reg node annotations"
+                sleep "$suite_settle_seconds"
+              fi
+              package="./validation/nodeannotations"
+              test_run="TestNodeAnnotationsTestSuite"
+              junit="$GITHUB_WORKSPACE/test-results/frameworks-reg-nodeannotations.xml"
+              set +e
+              (
+                cd "$tests_dir"
+                CATTLE_TEST_CONFIG="$config_path" gotestsum \
+                  --format standard-verbose \
+                  --junitfile "$junit" \
+                  -- \
+                  -v -tags="$tags" "$package" -run "$test_run"
+              )
+              exit_code=$?
+              set -e
+              conclusion="success"
+              if [ "$exit_code" -ne 0 ]; then
+                conclusion="failure"
+                failed=1
+              fi
+              append_result "$suite" "$package" "$test_run" "test-results/frameworks-reg-nodeannotations.xml" "$conclusion"
+            fi
+          done
+
+          jq -n \
+            --arg repo "https://github.com/rancher/tests.git" \
+            --arg ref "$tests_ref" \
+            --arg lane "${{ inputs.lane }}" \
+            --arg rancher_version "${{ inputs.rancher_version }}" \
+            --slurpfile results "$results_tmp" \
+            '{repo: $repo, ref: $ref, lane: $lane, rancher_version: $rancher_version, results: $results[0]}' \
+            > "$results_json"
+
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Delete downstream Linode K3s
+        if: ${{ always() && inputs.lane != 'fresh-alpha-local-suites' && (inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && steps.downstream.outcome == 'success' && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success'))) }}
+        run: go test -v -run TestHADeleteLinodeDownstream -timeout 25m ./terratest
+
+      - name: Run lane cleanup
+        id: cleanup
+        if: ${{ always() && (inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && (inputs.lane == 'fresh-alpha-local-suites' || steps.downstream.outcome == 'success') && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success'))) }}
+        run: go test -v -run TestHACleanup -timeout 30m ./terratest
+
+      - name: Render sign-off report
+        if: always()
+        continue-on-error: true
+        run: |
+          "$RUNNER_TEMP/render-signoff-report" \
+            -plan signoff-plan.json \
+            -lane "${{ inputs.lane }}" \
+            -output automation-output/signoff-report.md
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.lane }}-smoke
+          path: |
+            signoff-plan.json
+            lane.env
+            automation-output/signoff-report.md
+            automation-output/*.json
+            test-results/*.xml
+
+      - name: Write step summary
+        if: always()
+        run: |
+          {
+            echo "## Rancher alpha smoke"
+            echo ""
+            echo "- Lane: \`${{ inputs.lane }}\`"
+            echo "- Rancher version: \`${{ inputs.rancher_version }}\`"
+            echo "- Upgrade version: \`${RANCHER_UPGRADE_VERSION:-none}\`"
+            echo "- Terraform state key: \`${TF_STATE_KEY:-unset}\`"
+            echo "- Setup outcome: \`${{ steps.setup.outcome }}\`"
+            echo "- Readiness outcome: \`${{ steps.ready.outcome }}\`"
+            echo "- Local suite env outcome: \`${{ steps.local_suite_env.outcome }}\`"
+            echo "- Downstream outcome: \`${{ steps.downstream.outcome }}\`"
+            echo "- Local webhook override outcome: \`${{ steps.local_webhook.outcome }}\`"
+            echo "- Downstream webhook override outcome: \`${{ steps.downstream_webhook.outcome }}\`"
+            echo "- Upgrade outcome: \`${{ steps.upgrade.outcome }}\`"
+            echo "- Rancher tests outcome: \`${{ steps.rancher_tests.outcome }}\`"
+            echo "- Cleanup requested: \`${{ inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && (inputs.lane == 'fresh-alpha-local-suites' || steps.downstream.outcome == 'success') && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success')) }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

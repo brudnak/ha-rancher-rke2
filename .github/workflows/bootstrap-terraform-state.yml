@@ -1,0 +1,119 @@
+name: Bootstrap Terraform State
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: AWS region for the state bucket and lock table.
+        required: true
+        default: us-east-2
+        type: string
+      state_bucket_name:
+        description: Globally unique S3 bucket name for Terraform state.
+        required: true
+        type: string
+      lock_table_name:
+        description: DynamoDB table name for Terraform state locks.
+        required: true
+        default: ha-rancher-rke2-terraform-locks
+        type: string
+      noncurrent_state_version_expiration_days:
+        description: Days to retain old noncurrent state versions.
+        required: true
+        default: "30"
+        type: string
+      apply:
+        description: Apply the bootstrap plan. Leave false for plan-only.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    environment: automation-bootstrap
+    defaults:
+      run:
+        working-directory: bootstrap/terraform-state
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_BOOTSTRAP_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -no-color
+
+      - name: Terraform validate
+        run: terraform validate -no-color
+
+      - name: Terraform plan
+        run: |
+          terraform plan -no-color -out=tfplan \
+            -var "aws_region=${{ inputs.aws_region }}" \
+            -var "state_bucket_name=${{ inputs.state_bucket_name }}" \
+            -var "lock_table_name=${{ inputs.lock_table_name }}" \
+            -var "noncurrent_state_version_expiration_days=${{ inputs.noncurrent_state_version_expiration_days }}"
+
+      - name: Terraform apply
+        if: ${{ inputs.apply }}
+        run: terraform apply -no-color -auto-approve tfplan
+
+      - name: Write backend env artifact
+        if: ${{ inputs.apply }}
+        run: |
+          {
+            echo "TF_STATE_BUCKET=$(terraform output -raw state_bucket_name)"
+            echo "TF_STATE_LOCK_TABLE=$(terraform output -raw lock_table_name)"
+            echo "TF_STATE_REGION=${{ inputs.aws_region }}"
+          } > backend.env
+
+      - name: Upload backend env artifact
+        if: ${{ inputs.apply }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: terraform-backend-env
+          path: bootstrap/terraform-state/backend.env
+
+      - name: Write step summary
+        if: always()
+        run: |
+          {
+            echo "## Terraform state bootstrap"
+            echo ""
+            echo "- Region: \`${{ inputs.aws_region }}\`"
+            echo "- Bucket: \`${{ inputs.state_bucket_name }}\`"
+            echo "- Lock table: \`${{ inputs.lock_table_name }}\`"
+            echo "- Apply requested: \`${{ inputs.apply }}\`"
+            if [ "${{ inputs.apply }}" = "true" ] && [ -s backend.env ]; then
+              echo ""
+              echo "### Non-secret automation values"
+              echo ""
+              echo "Put these in the \`automation-smoke\` environment variables:"
+              echo ""
+              echo '```bash'
+              cat backend.env
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

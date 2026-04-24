@@ -26,6 +26,11 @@ func validateLocalToolingPreflight(helmCommands []string) error {
 		}
 	}
 
+	helmRepoAliases := helmRepoAliasesFromCommands(helmCommands)
+	if err := ensureRancherHelmRepos(helmRepoAliases, true); err != nil {
+		return err
+	}
+
 	if err := refreshHelmRepoIndexes(); err != nil {
 		return err
 	}
@@ -41,6 +46,37 @@ func validateLocalToolingPreflight(helmCommands []string) error {
 	}
 
 	log.Printf("[preflight] Local tooling validated successfully")
+	return nil
+}
+
+var rancherHelmRepoURLs = map[string]string{
+	"rancher-latest":         "https://releases.rancher.com/server-charts/latest",
+	"rancher-stable":         "https://releases.rancher.com/server-charts/stable",
+	"rancher-alpha":          "https://releases.rancher.com/server-charts/alpha",
+	"rancher-prime":          "https://charts.rancher.com/server-charts/prime",
+	"optimus-rancher-latest": "https://charts.optimus.rancher.io/server-charts/latest",
+	"optimus-rancher-alpha":  "https://charts.optimus.rancher.io/server-charts/alpha",
+	"rancher-optimus-alpha":  "https://s3.amazonaws.com/charts.optimus.rancher.io/server-charts/bin/chart/alpha",
+	"optimus-s3":             "http://charts.optimus.rancher.io.s3.amazonaws.com/server-charts/latest",
+}
+
+func ensureRancherHelmRepos(repoAliases []string, required bool) error {
+	for _, repoAlias := range repoAliases {
+		repoURL, ok := rancherHelmRepoURLs[repoAlias]
+		if !ok {
+			continue
+		}
+
+		log.Printf("[preflight] Ensuring Helm repo %s -> %s", repoAlias, repoURL)
+		output, err := exec.Command("helm", "repo", "add", repoAlias, repoURL, "--force-update").CombinedOutput()
+		if err != nil {
+			message := fmt.Sprintf("failed to add or update Helm repo %s (%s): %v (%s)", repoAlias, repoURL, err, strings.TrimSpace(string(output)))
+			if required {
+				return fmt.Errorf("%s", message)
+			}
+			log.Printf("[preflight] Optional Helm repo unavailable, resolver will try remaining repos: %s", message)
+		}
+	}
 	return nil
 }
 
@@ -180,6 +216,44 @@ func findMissingHelmRepos(helmRepoListOutput string, helmCommands []string) []st
 	}
 	slices.Sort(missing)
 	return missing
+}
+
+func helmRepoAliasesFromCommands(helmCommands []string) []string {
+	aliases := map[string]bool{}
+	for _, helmCommand := range helmCommands {
+		if repoName := helmRepoAliasFromCommand(helmCommand); repoName != "" {
+			aliases[repoName] = true
+		}
+	}
+
+	var result []string
+	for repoName := range aliases {
+		result = append(result, repoName)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func helmRepoAliasFromCommand(helmCommand string) string {
+	fields := strings.Fields(helmCommand)
+	for _, field := range fields {
+		if !strings.Contains(field, "/") {
+			continue
+		}
+		if strings.HasPrefix(field, "http://") || strings.HasPrefix(field, "https://") {
+			continue
+		}
+		if strings.HasPrefix(field, "--") {
+			continue
+		}
+
+		repoName := strings.SplitN(field, "/", 2)[0]
+		if repoName == "" || repoName == "." {
+			continue
+		}
+		return repoName
+	}
+	return ""
 }
 
 func getRKE2InstallScriptURL(rke2Version, expectedInstallerSHA256 string) (string, string, error) {

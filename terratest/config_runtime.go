@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/brudnak/ha-rancher-rke2/terratest/hcl"
@@ -25,9 +27,15 @@ func setupConfig(t *testing.T) {
 func getTerraformOptions(t *testing.T, totalHAs int) *terraform.Options {
 	generateAwsVars()
 
+	backendConfig, err := terraformBackendConfigFromEnv()
+	if err != nil {
+		t.Fatalf("Invalid Terraform backend environment: %v", err)
+	}
+
 	return terraform.WithDefaultRetryableErrors(t, &terraform.Options{
-		TerraformDir: "../modules/aws",
-		NoColor:      true,
+		TerraformDir:  "../modules/aws",
+		NoColor:       true,
+		BackendConfig: backendConfig,
 		Vars: map[string]interface{}{
 			"total_has":             totalHAs,
 			"aws_prefix":            viper.GetString("tf_vars.aws_prefix"),
@@ -42,6 +50,40 @@ func getTerraformOptions(t *testing.T, totalHAs int) *terraform.Options {
 			"aws_route53_fqdn":      viper.GetString("tf_vars.aws_route53_fqdn"),
 		},
 	})
+}
+
+func terraformBackendConfigFromEnv() (map[string]interface{}, error) {
+	values := map[string]string{
+		"TF_STATE_BUCKET":     strings.TrimSpace(os.Getenv("TF_STATE_BUCKET")),
+		"TF_STATE_LOCK_TABLE": strings.TrimSpace(os.Getenv("TF_STATE_LOCK_TABLE")),
+		"TF_STATE_REGION":     strings.TrimSpace(os.Getenv("TF_STATE_REGION")),
+		"TF_STATE_KEY":        strings.TrimSpace(os.Getenv("TF_STATE_KEY")),
+	}
+
+	anySet := false
+	var missing []string
+	for key, value := range values {
+		if value != "" {
+			anySet = true
+			continue
+		}
+		missing = append(missing, key)
+	}
+
+	if !anySet {
+		return nil, nil
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("set all remote backend env vars or none; missing %s", strings.Join(missing, ", "))
+	}
+
+	return map[string]interface{}{
+		"bucket":         values["TF_STATE_BUCKET"],
+		"key":            values["TF_STATE_KEY"],
+		"region":         values["TF_STATE_REGION"],
+		"dynamodb_table": values["TF_STATE_LOCK_TABLE"],
+		"encrypt":        true,
+	}, nil
 }
 
 func generateAwsVars() {

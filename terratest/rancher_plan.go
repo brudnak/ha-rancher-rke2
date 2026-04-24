@@ -19,6 +19,11 @@ import (
 	"golang.org/x/net/html"
 )
 
+const (
+	rancherHelmOperationInstall = "install"
+	rancherHelmOperationUpgrade = "upgrade"
+)
+
 func prepareRancherConfiguration(totalHAs int) ([]*RancherResolvedPlan, error) {
 	mode := strings.ToLower(strings.TrimSpace(viper.GetString("rancher.mode")))
 	switch mode {
@@ -70,10 +75,6 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 		return nil, err
 	}
 
-	if err := refreshHelmRepoIndexes(); err != nil {
-		return nil, err
-	}
-
 	requestedDistro := strings.ToLower(strings.TrimSpace(viper.GetString("rancher.distro")))
 	if requestedDistro == "" {
 		requestedDistro = "auto"
@@ -82,6 +83,26 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 	bootstrapPassword := viper.GetString("rancher.bootstrap_password")
 	if bootstrapPassword == "" {
 		return nil, fmt.Errorf("rancher.bootstrap_password must be set when rancher.mode=auto")
+	}
+
+	repoAliases := map[string]bool{}
+	for _, requestedVersion := range requestedVersions {
+		buildType, _, err := classifyRancherVersion(requestedVersion)
+		if err != nil {
+			return nil, err
+		}
+		repoCandidates, _, _ := chooseRancherSourceCandidates(requestedDistro, buildType)
+		for _, repoAlias := range repoCandidates {
+			repoAliases[repoAlias] = true
+		}
+	}
+	repoAliases["rancher-latest"] = true
+	repoAliases["rancher-prime"] = true
+	if err := ensureRancherHelmRepos(mapKeys(repoAliases), false); err != nil {
+		return nil, err
+	}
+	if err := refreshHelmRepoIndexes(); err != nil {
+		return nil, err
 	}
 
 	plans := make([]*RancherResolvedPlan, 0, len(requestedVersions))
@@ -145,7 +166,7 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 			return nil, err
 		}
 
-		helmCommands := buildAutoHelmCommands(1, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage)
+		helmCommands := buildAutoHelmCommands(1, rancherHelmOperationInstall, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage)
 
 		plans = append(plans, &RancherResolvedPlan{
 			Mode:                   "auto",
@@ -168,6 +189,15 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 	}
 
 	return plans, nil
+}
+
+func mapKeys(values map[string]bool) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func getRequestedRancherVersions(totalHAs int) ([]string, error) {
@@ -665,9 +695,37 @@ func resolveInstallerSHA256(rke2Version string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func buildAutoHelmCommands(totalHAs int, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage string) []string {
-	baseSettings := []string{
-		"helm install rancher " + chartRepoAlias + "/rancher \\",
+func buildAutoHelmCommands(totalHAs int, operation, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage string) []string {
+	command := buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage)
+	commands := make([]string, totalHAs)
+	for i := 0; i < totalHAs; i++ {
+		commands[i] = command
+	}
+	return commands
+}
+
+func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage string) string {
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	if operation == "" {
+		operation = rancherHelmOperationInstall
+	}
+
+	var baseSettings []string
+	switch operation {
+	case rancherHelmOperationInstall:
+		baseSettings = []string{
+			"helm install rancher " + chartRepoAlias + "/rancher \\",
+		}
+	case rancherHelmOperationUpgrade:
+		baseSettings = []string{
+			"helm upgrade rancher " + chartRepoAlias + "/rancher \\",
+			"  --install \\",
+		}
+	default:
+		panic(fmt.Sprintf("unsupported Rancher Helm operation %q", operation))
+	}
+
+	baseSettings = append(baseSettings, []string{
 		"  --namespace cattle-system \\",
 		"  --version " + chartVersion + " \\",
 		"  --set hostname=placeholder \\",
@@ -675,7 +733,7 @@ func buildAutoHelmCommands(totalHAs int, chartRepoAlias, chartVersion, bootstrap
 		"  --set ingress.tls.source=secret \\",
 		"  --set global.cattle.psp.enabled=false \\",
 		"  --set agentTLSMode=system-store",
-	}
+	}...)
 
 	if rancherImage != "" {
 		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
@@ -694,12 +752,15 @@ func buildAutoHelmCommands(totalHAs int, chartRepoAlias, chartVersion, bootstrap
 		}, baseSettings[len(baseSettings)-1:]...)...)
 	}
 
-	command := strings.Join(baseSettings, "\n")
-	commands := make([]string, totalHAs)
-	for i := 0; i < totalHAs; i++ {
-		commands[i] = command
+	if operation == rancherHelmOperationUpgrade {
+		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
+			"  --wait \\",
+			"  --wait-for-jobs \\",
+			"  --timeout 30m \\",
+		}, baseSettings[len(baseSettings)-1:]...)...)
 	}
-	return commands
+
+	return strings.Join(baseSettings, "\n")
 }
 
 func fetchURLBody(url string) (string, error) {

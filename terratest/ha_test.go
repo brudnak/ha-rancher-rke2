@@ -11,6 +11,7 @@ import (
 )
 
 func TestHaSetup(t *testing.T) {
+	requireExplicitLifecycleTest(t, "TestHaSetup")
 	setupConfig(t)
 
 	if err := maybeEditAutoModePreflight(); err != nil {
@@ -96,6 +97,7 @@ func TestHaSetup(t *testing.T) {
 }
 
 func TestHACleanup(t *testing.T) {
+	requireExplicitLifecycleTest(t, "TestHACleanup")
 	setupConfig(t)
 	totalHAs := viper.GetInt("total_has")
 	if err := validateSecretEnvironment(); err != nil {
@@ -121,5 +123,6 @@ func TestHACleanup(t *testing.T) {
 }
 
 func TestHAControlPanel(t *testing.T) {
+	requireExplicitLifecycleTest(t, "TestHAControlPanel")
 	runHAControlPanelTest(t)
 }
