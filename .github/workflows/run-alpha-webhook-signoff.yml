@@ -201,7 +201,7 @@ jobs:
       - name: Provision downstream Linode K3s
         id: downstream
         if: ${{ inputs.lane != 'fresh-alpha-local-suites' }}
-        run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHAProvisionLinodeDownstream$' -timeout 55m ./terratest
+        run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHAProvisionLinodeDownstream$' -timeout 20m ./terratest
 
       - name: Override local webhook image
         id: local_webhook

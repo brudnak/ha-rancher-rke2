@@ -85,7 +85,7 @@ func TestHAProvisionLinodeDownstream(t *testing.T) {
 		namePrefix = "ha-rancher-rke2"
 	}
 
-	timeout := durationFromEnv("LINODE_DOWNSTREAM_TIMEOUT", 45*time.Minute)
+	timeout := durationFromEnv("LINODE_DOWNSTREAM_TIMEOUT", 15*time.Minute)
 	var wg sync.WaitGroup
 	errCh := make(chan error, totalHAs)
 	for i := 1; i <= totalHAs; i++ {
