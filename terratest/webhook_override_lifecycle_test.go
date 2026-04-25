@@ -155,6 +155,70 @@ func TestHAOverrideDownstreamWebhook(t *testing.T) {
 	}
 }
 
+func TestHAWaitWebhookChartVersion(t *testing.T) {
+	requireExplicitLifecycleTest(t, "TestHAWaitWebhookChartVersion")
+	setupConfig(t)
+
+	expectedVersion, err := expectedWebhookChartVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := readDownstreamOutputRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	totalHAs := viper.GetInt("total_has")
+	if totalHAs < 1 {
+		t.Fatal("total_has must be at least 1")
+	}
+
+	timeout := durationFromEnv("RANCHER_DOWNSTREAM_WEBHOOK_CHART_TIMEOUT", 15*time.Minute)
+	interval := durationFromEnv("RANCHER_DOWNSTREAM_WEBHOOK_CHART_INTERVAL", 20*time.Second)
+	settleDelay := durationFromEnv("RANCHER_DOWNSTREAM_WEBHOOK_CHART_SETTLE_DELAY", 30*time.Second)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, totalHAs+len(records))
+	for i := 1; i <= totalHAs; i++ {
+		instanceNum := i
+		kubeconfigPath := filepath.Join(fmt.Sprintf("high-availability-%d", instanceNum), "kube_config.yaml")
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := waitForWebhookChartVersion(instanceNum, "local", "local", kubeconfigPath, expectedVersion, timeout, interval, settleDelay); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	for _, record := range records {
+		record := record
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			kubeconfigPath, err := ensureDownstreamKubeconfig(record)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if err := waitForWebhookChartVersion(record.HAIndex, "downstream", record.ClusterName, kubeconfigPath, expectedVersion, timeout, interval, settleDelay); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var failures []string
+	for err := range errCh {
+		failures = append(failures, err.Error())
+	}
+	if len(failures) > 0 {
+		t.Fatalf("webhook chart version wait failed:\n%s", strings.Join(failures, "\n"))
+	}
+}
+
 func overrideLocalWebhook(instanceNum int, webhookImage string) error {
 	haDir := fmt.Sprintf("high-availability-%d", instanceNum)
 	currentDir, err := os.Getwd()
@@ -184,6 +248,85 @@ func overrideDownstreamWebhook(record downstreamOutputRecord, webhookImage strin
 		return err
 	}
 	return writeWebhookOverrideRecord("downstream", record.HAIndex, record.ClusterName, target, webhookImage)
+}
+
+func expectedWebhookChartVersion() (string, error) {
+	if version := strings.TrimSpace(os.Getenv("RANCHER_WEBHOOK_CHART_VERSION")); version != "" {
+		return version, nil
+	}
+
+	data, err := os.ReadFile("signoff-plan.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to read signoff-plan.json for target webhook version: %w", err)
+	}
+	var plan struct {
+		TargetWebhookBuild string `json:"target_webhook_build"`
+	}
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return "", fmt.Errorf("failed to parse signoff-plan.json for target webhook version: %w", err)
+	}
+	if strings.TrimSpace(plan.TargetWebhookBuild) == "" {
+		return "", fmt.Errorf("signoff-plan.json target_webhook_build is empty")
+	}
+	return strings.TrimSpace(plan.TargetWebhookBuild), nil
+}
+
+func waitForWebhookChartVersion(instanceNum int, scope, clusterName, kubeconfigPath, expectedVersion string, timeout, interval, settleDelay time.Duration) error {
+	start := time.Now()
+	deadline := start.Add(timeout)
+	attempt := 0
+	for time.Now().Before(deadline) {
+		attempt++
+		version, err := installedWebhookChartVersion(kubeconfigPath)
+		if err != nil {
+			log.Printf("[webhook][ha-%d][%s:%s] Attempt %d after %s: chart version unavailable: %v",
+				instanceNum, scope, clusterName, attempt, time.Since(start).Round(time.Second), err)
+		} else {
+			log.Printf("[webhook][ha-%d][%s:%s] Attempt %d after %s: webhook chart=%s want=%s",
+				instanceNum, scope, clusterName, attempt, time.Since(start).Round(time.Second), version, expectedVersion)
+			if version == expectedVersion {
+				target, err := discoverWebhookDeployment(kubeconfigPath, "")
+				if err != nil {
+					return err
+				}
+				if err := runKubectlDirect(kubeconfigPath, "rollout", "status", "deployment/"+target.DeploymentName, "-n", target.Namespace, "--timeout=5m"); err != nil {
+					return err
+				}
+				if settleDelay > 0 {
+					log.Printf("[webhook][ha-%d][%s:%s] Webhook chart version is ready; settling for %s",
+						instanceNum, scope, clusterName, settleDelay)
+					time.Sleep(settleDelay)
+				}
+				return nil
+			}
+		}
+		time.Sleep(interval)
+	}
+
+	return fmt.Errorf("timed out after %s waiting for %s cluster %s webhook chart version %s", timeout, scope, clusterName, expectedVersion)
+}
+
+func installedWebhookChartVersion(kubeconfigPath string) (string, error) {
+	output, err := runKubectlOutput(kubeconfigPath, "get", "apps.catalog.cattle.io", "rancher-webhook", "-n", "cattle-system", "-o", "json")
+	if err != nil {
+		return "", err
+	}
+	var app struct {
+		Spec struct {
+			Chart struct {
+				Metadata struct {
+					Version string `json:"version"`
+				} `json:"metadata"`
+			} `json:"chart"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal([]byte(output), &app); err != nil {
+		return "", fmt.Errorf("failed to parse rancher-webhook app: %w", err)
+	}
+	if strings.TrimSpace(app.Spec.Chart.Metadata.Version) == "" {
+		return "", fmt.Errorf("rancher-webhook app spec.chart.metadata.version is empty")
+	}
+	return strings.TrimSpace(app.Spec.Chart.Metadata.Version), nil
 }
 
 func ensureDownstreamKubeconfig(record downstreamOutputRecord) (string, error) {

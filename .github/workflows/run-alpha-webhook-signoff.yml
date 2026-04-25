@@ -61,6 +61,7 @@ concurrency:
 
 jobs:
   fresh-alpha:
+    name: ${{ inputs.lane }}
     runs-on: ubuntu-latest
     environment: automation-smoke
     env:
@@ -217,6 +218,11 @@ jobs:
         id: upgrade
         if: ${{ inputs.lane == 'upgrade-alpha' }}
         run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHAUpgradeRancher$' -timeout 45m ./terratest
+
+      - name: Wait for webhook chart rollout
+        id: webhook_chart
+        if: ${{ (inputs.lane == 'upgrade-alpha' || inputs.lane == 'previous-with-candidate-webhook') && inputs.run_rancher_tests == true }}
+        run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHAWaitWebhookChartVersion$' -timeout 20m ./terratest
 
       - name: Run Rancher tests
         id: rancher_tests
