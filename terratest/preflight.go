@@ -345,8 +345,8 @@ func buildRKE2ImagesDownloadCommand(rke2Version string) string {
 	imagesURL := fmt.Sprintf("https://github.com/rancher/rke2/releases/download/%s/rke2-images.linux-amd64.tar.zst", rke2Version)
 	checksumURL := fmt.Sprintf("https://github.com/rancher/rke2/releases/download/%s/sha256sum-amd64.txt", rke2Version)
 
-	return fmt.Sprintf(`curl -fsSL -o /tmp/rke2-images.linux-amd64.tar.zst %s
-curl -fsSL -o /tmp/rke2-sha256sum-amd64.txt %s
+	return fmt.Sprintf(`curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 600 -o /tmp/rke2-images.linux-amd64.tar.zst %s
+curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 120 -o /tmp/rke2-sha256sum-amd64.txt %s
 
 if ! (cd /tmp && grep 'rke2-images.linux-amd64.tar.zst' /tmp/rke2-sha256sum-amd64.txt | sha256sum -c -); then
   echo "############################################################" >&2

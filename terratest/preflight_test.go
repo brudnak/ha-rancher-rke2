@@ -2,6 +2,7 @@ package test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +57,21 @@ func TestKnownRancherHelmRepoURLs(t *testing.T) {
 	for _, repoAlias := range required {
 		if rancherHelmRepoURLs[repoAlias] == "" {
 			t.Fatalf("expected %s to have a known URL", repoAlias)
+		}
+	}
+}
+
+func TestBuildRKE2ImagesDownloadCommandRetriesDownloadsAndValidatesChecksum(t *testing.T) {
+	command := buildRKE2ImagesDownloadCommand("v1.34.6+rke2r3")
+
+	for _, want := range []string{
+		"curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 600 -o /tmp/rke2-images.linux-amd64.tar.zst",
+		"curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 120 -o /tmp/rke2-sha256sum-amd64.txt",
+		"grep 'rke2-images.linux-amd64.tar.zst' /tmp/rke2-sha256sum-amd64.txt | sha256sum -c -",
+		"SECURITY ERROR: RKE2 images checksum validation failed",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("expected RKE2 image download command to contain %q:\n%s", want, command)
 		}
 	}
 }
