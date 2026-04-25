@@ -1,5 +1,5 @@
-name: Plan Webhook Sign-Off
-run-name: ${{ github.event.inputs.rancher_version && format('Plan Webhook Sign-Off {0}', github.event.inputs.rancher_version) || 'Plan Webhook Sign-Off latest per line' }}
+name: Plan Alpha/Webhook Sign-Off
+run-name: ${{ github.event.inputs.rancher_version && format('Plan Alpha/Webhook Sign-Off {0}', github.event.inputs.rancher_version) || 'Plan Alpha/Webhook Sign-Off latest per line' }}
 
 on:
   workflow_dispatch:
@@ -82,7 +82,7 @@ jobs:
       - name: Write step summary
         run: |
           {
-            echo "## Webhook sign-off plan"
+            echo "## Alpha/webhook sign-off plan"
             echo ""
             echo '```json'
             cat signoff-plan.json

@@ -42,9 +42,7 @@ Current workflow layers:
 
 - `signoff-plan.yml`: safe scheduled/manual planner only.
 - `bootstrap-terraform-state.yml`: manual S3/DynamoDB backend bootstrap, plan-only unless `apply=true`.
-- `fresh-alpha-smoke.yml`: manual provisioning smoke test for `fresh-alpha`, `upgrade-alpha`, `previous-with-candidate-webhook`, or `fresh-alpha-local-suites`, with automatic Helm repo setup, Rancher readiness gates, optional Linode downstream provisioning, webhook overrides, optional direct `rancher/tests` suites, Markdown reporting, and automatic cleanup.
-- `cleanup-generated-reports.yml`: manual cleanup for generated report areas. It defaults to dry-run and only deletes when `apply=true`.
-
+- `run-alpha-webhook-signoff.yml`: manual sign-off lane runner for `fresh-alpha`, `upgrade-alpha`, `previous-with-candidate-webhook`, or `fresh-alpha-local-suites`, with automatic Helm repo setup, Rancher readiness gates, optional Linode downstream provisioning, webhook overrides, optional direct `rancher/tests` suites, Markdown reporting, and automatic cleanup.
 ## Actions Visibility And State Bootstrap
 
 Run `bootstrap-terraform-state.yml` from GitHub Actions when you want the repo-owned automation to create the S3 state bucket and DynamoDB lock table. Keep it behind the protected `automation-bootstrap` environment with an OIDC role in `AWS_BOOTSTRAP_ROLE_ARN`.

@@ -87,16 +87,15 @@ generated Linode root password before noisy provisioning steps.
 | --- | --- | --- |
 | `signoff-plan.yml` | no | Scheduled/manual plan generation only. Safe first workflow. |
 | `bootstrap-terraform-state.yml` | yes, only when `apply=true` | Creates or updates the persistent S3/DynamoDB backend. |
-| `fresh-alpha-smoke.yml` | yes | Provisions Rancher lanes, optionally Linode downstreams and direct `rancher/tests` suite runs, then cleans up. |
-| `cleanup-generated-reports.yml` | no cloud resources | Dry-run by default; can remove generated report files from the repo. |
+| `run-alpha-webhook-signoff.yml` | yes | Runs one alpha/webhook sign-off lane, optionally with Linode downstreams and direct `rancher/tests` suite runs, then cleans up. |
 
 ## First Live Run
 
 After environments, secrets, and variables are configured:
 
-1. Run `Plan Webhook Sign-Off` manually for a known alpha, for example
+1. Run `Plan Alpha/Webhook Sign-Off` manually for a known alpha, for example
    `v2.13.5-alpha5`.
-2. Run `Rancher Alpha Smoke` with:
+2. Run `Run Alpha/Webhook Sign-Off` with:
    - `rancher_version`: `v2.13.5-alpha5`
    - `lane`: `fresh-alpha-local-suites`
    - `keep_infra_on_failure`: `false`
@@ -136,8 +135,3 @@ It does not upload:
 ## Cleanup
 
 Normal smoke runs clean up automatically when `keep_infra_on_failure=false`.
-
-For generated Markdown/report cleanup, run `Cleanup Generated Reports`.
-It defaults to dry-run. Set `apply=true` only after reviewing the dry-run output.
-Set `commit_changes=true` only when you want the workflow to push the cleanup
-commit back to the branch.
