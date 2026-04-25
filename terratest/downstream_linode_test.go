@@ -42,6 +42,10 @@ func TestRenderLinodeDownstreamManifests(t *testing.T) {
 			t.Fatalf("expected manifest to contain %q:\n%s", snippet, manifest)
 		}
 	}
+
+	if strings.Contains(manifest, "\ntype: rke-machine-config.cattle.io.linodeconfig\n") {
+		t.Fatalf("LinodeConfig manifest contains obsolete type field:\n%s", manifest)
+	}
 }
 
 func TestDNSLabel(t *testing.T) {

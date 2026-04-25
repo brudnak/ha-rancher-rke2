@@ -410,7 +410,6 @@ stackscriptData: ""
 swapSize: "512"
 tags: %s
 token: ""
-type: rke-machine-config.cattle.io.linodeconfig
 uaPrefix: Rancher
 ---
 apiVersion: provisioning.cattle.io/v1
