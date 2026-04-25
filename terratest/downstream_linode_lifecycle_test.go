@@ -2,10 +2,13 @@ package test
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,8 +37,6 @@ type downstreamProvisioningConfig struct {
 	InstanceType string
 	Image        string
 	K3SVersion   string
-	RootPassword string
-	Tags         string
 	LinodeToken  string
 }
 
@@ -133,26 +134,42 @@ func provisionLinodeDownstreamForHA(instanceNum int, haOutputs TerraformOutputs,
 		clusterName = dnsLabel(fmt.Sprintf("%s-%s-ha%d-%s", namePrefix, shortRunID(runID), instanceNum, suffix))
 	}
 
-	rootPassword := randomRootPassword()
-	maskGitHubActionsValue(rootPassword)
 	cfg := downstreamProvisioningConfig{
 		ClusterName:  clusterName,
-		MachineName:  dnsLabel(clusterName + "-pool1"),
 		SecretName:   dnsLabel("cc-" + clusterName),
 		Namespace:    defaultLinodeNamespace,
 		Region:       envOrDefaultTrimmed("LINODE_REGION", defaultLinodeRegion),
 		InstanceType: envOrDefaultTrimmed("LINODE_INSTANCE_TYPE", defaultLinodeInstanceType),
 		Image:        envOrDefaultTrimmed("LINODE_IMAGE", defaultLinodeImage),
 		K3SVersion:   k3sVersion,
-		RootPassword: rootPassword,
-		Tags:         fmt.Sprintf("ha-rancher-rke2,%s,%s", namePrefix, clusterName),
 		LinodeToken:  linodeToken,
 	}
 
 	log.Printf("[downstream][ha-%d] Creating one-node Linode K3s cluster %s on %s (%s, %s, %s)",
 		instanceNum, cfg.ClusterName, clickableURL(haOutputs.RancherURL), cfg.K3SVersion, cfg.Region, cfg.InstanceType)
 
-	if err := kubectlApply(kubeconfigPath, renderLinodeDownstreamManifests(cfg)); err != nil {
+	if err := kubectlApply(kubeconfigPath, renderLinodeCredentialSecretManifest(cfg)); err != nil {
+		return err
+	}
+
+	adminToken, err := createRancherAdminToken(haOutputs.RancherURL, viper.GetString("rancher.bootstrap_password"))
+	if err != nil {
+		return err
+	}
+	if err := configureRancherServerURL(haOutputs.RancherURL, adminToken); err != nil {
+		return err
+	}
+	machineName, err := createLinodeMachineConfig(haOutputs.RancherURL, adminToken, cfg)
+	if err != nil {
+		_ = runKubectlDirect(kubeconfigPath, "delete", "secret", cfg.SecretName, "-n", "cattle-global-data", "--ignore-not-found=true")
+		return err
+	}
+	cfg.MachineName = machineName
+	log.Printf("[downstream][ha-%d] Created Linode machine config %s", instanceNum, cfg.MachineName)
+
+	if err := kubectlApply(kubeconfigPath, renderLinodeDownstreamClusterManifest(cfg)); err != nil {
+		_ = runKubectlDirect(kubeconfigPath, "delete", "linodeconfig.rke-machine-config.cattle.io", cfg.MachineName, "-n", cfg.Namespace, "--ignore-not-found=true")
+		_ = runKubectlDirect(kubeconfigPath, "delete", "secret", cfg.SecretName, "-n", "cattle-global-data", "--ignore-not-found=true")
 		return err
 	}
 
@@ -387,7 +404,52 @@ func normalizeK3SVersion(version string) string {
 	return "v" + version
 }
 
-func renderLinodeDownstreamManifests(cfg downstreamProvisioningConfig) string {
+func createLinodeMachineConfig(rancherURL, bearerToken string, cfg downstreamProvisioningConfig) (string, error) {
+	rancherURL = strings.TrimRight(clickableURL(rancherURL), "/")
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	var out struct {
+		ID       string `json:"id"`
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+	}
+	apiURL := fmt.Sprintf("%s/v1/rke-machine-config.cattle.io.linodeconfigs/%s", rancherURL, url.PathEscape(cfg.Namespace))
+	if err := postRancherJSON(client, apiURL, bearerToken, linodeMachineConfigPayload(cfg), &out); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out.Metadata.Name) != "" {
+		return out.Metadata.Name, nil
+	}
+	if strings.TrimSpace(out.ID) != "" {
+		parts := strings.Split(out.ID, "/")
+		return parts[len(parts)-1], nil
+	}
+	return "", fmt.Errorf("Rancher LinodeConfig response did not include a machine config name")
+}
+
+func linodeMachineConfigPayload(cfg downstreamProvisioningConfig) map[string]interface{} {
+	return map[string]interface{}{
+		"image":        cfg.Image,
+		"instanceType": cfg.InstanceType,
+		"interfaces":   []interface{}{},
+		"metadata": map[string]interface{}{
+			"annotations":  map[string]string{},
+			"generateName": fmt.Sprintf("nc-%s-pool1-", cfg.ClusterName),
+			"labels":       map[string]string{},
+			"namespace":    cfg.Namespace,
+		},
+		"region": cfg.Region,
+		"type":   "rke-machine-config.cattle.io.linodeconfig",
+	}
+}
+
+func renderLinodeCredentialSecretManifest(cfg downstreamProvisioningConfig) string {
 	return fmt.Sprintf(`apiVersion: v1
 kind: Secret
 metadata:
@@ -398,29 +460,15 @@ metadata:
 type: Opaque
 stringData:
   linodecredentialConfig-token: %s
----
-apiVersion: rke-machine-config.cattle.io/v1
-kind: LinodeConfig
-metadata:
-  name: %s
-  namespace: %s
-authorizedUsers: ""
-createPrivateIp: false
-dockerPort: "2376"
-image: %s
-instanceType: %s
-region: %s
-rootPass: %s
-sshPort: "22"
-sshUser: root
-stackscript: ""
-stackscriptData: ""
-swapSize: "512"
-tags: %s
-token: ""
-uaPrefix: Rancher
----
-apiVersion: provisioning.cattle.io/v1
+`,
+		yamlScalar(cfg.SecretName),
+		yamlScalar(cfg.SecretName),
+		yamlScalar(cfg.LinodeToken),
+	)
+}
+
+func renderLinodeDownstreamClusterManifest(cfg downstreamProvisioningConfig) string {
+	return fmt.Sprintf(`apiVersion: provisioning.cattle.io/v1
 kind: Cluster
 metadata:
   name: %s
@@ -498,16 +546,6 @@ spec:
         skipWaitForDeleteTimeoutSeconds: 0
         timeout: 120
 `,
-		yamlScalar(cfg.SecretName),
-		yamlScalar(cfg.SecretName),
-		yamlScalar(cfg.LinodeToken),
-		yamlScalar(cfg.MachineName),
-		yamlScalar(cfg.Namespace),
-		yamlScalar(cfg.Image),
-		yamlScalar(cfg.InstanceType),
-		yamlScalar(cfg.Region),
-		yamlScalar(cfg.RootPassword),
-		yamlScalar(cfg.Tags),
 		yamlScalar(cfg.ClusterName),
 		yamlScalar(cfg.Namespace),
 		yamlScalar("cattle-global-data:"+cfg.SecretName),
@@ -529,6 +567,9 @@ func waitForProvisioningClusterActive(kubeconfigPath, namespace, clusterName str
 		} else {
 			summary := summarizeProvisioningClusterStatus(status)
 			log.Printf("[downstream] Cluster %s attempt %d after %s: %s", clusterName, attempt, time.Since(start).Round(time.Second), summary)
+			if attempt == 1 || attempt%6 == 0 {
+				logDownstreamProvisioningDiagnostics(kubeconfigPath, namespace, strings.TrimSpace(status.Status.ClusterName))
+			}
 			if strings.EqualFold(status.Status.Phase, "Active") || status.Status.Ready {
 				return nil
 			}
@@ -537,6 +578,42 @@ func waitForProvisioningClusterActive(kubeconfigPath, namespace, clusterName str
 	}
 
 	return fmt.Errorf("timed out after %s waiting for downstream cluster %s to become active", timeout, clusterName)
+}
+
+func logDownstreamProvisioningDiagnostics(kubeconfigPath, namespace, managementClusterID string) {
+	commands := [][]string{
+		{"get", "linodeconfigs.rke-machine-config.cattle.io", "-n", namespace, "-o", "wide"},
+		{"get", "clusters.cluster.x-k8s.io", "-A", "-o", "wide"},
+		{"get", "machinedeployments.cluster.x-k8s.io", "-A", "-o", "wide"},
+		{"get", "machinesets.cluster.x-k8s.io", "-A", "-o", "wide"},
+		{"get", "machines.cluster.x-k8s.io", "-A", "-o", "wide"},
+		{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"},
+	}
+	if managementClusterID != "" {
+		commands = append(commands,
+			[]string{"describe", "clusters.cluster.x-k8s.io", managementClusterID, "-n", namespace},
+			[]string{"get", "machines.cluster.x-k8s.io", "-A", "-l", "cluster.x-k8s.io/cluster-name=" + managementClusterID, "-o", "yaml"},
+		)
+	}
+
+	for _, args := range commands {
+		output, err := runKubectlOutput(kubeconfigPath, args...)
+		label := strings.Join(args, " ")
+		if err != nil {
+			log.Printf("[downstream][diagnostics][%s] %v", label, err)
+			continue
+		}
+		log.Printf("[downstream][diagnostics][%s]\n%s", label, trimDiagnosticOutput(output))
+	}
+}
+
+func trimDiagnosticOutput(output string) string {
+	const maxLen = 6000
+	output = strings.TrimSpace(output)
+	if len(output) <= maxLen {
+		return output
+	}
+	return output[:maxLen] + "\n...<truncated>"
 }
 
 func getProvisioningClusterStatus(kubeconfigPath, namespace, clusterName string) (provisioningClusterStatus, error) {
@@ -667,10 +744,6 @@ func randomHex(byteCount int) string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(buf)
-}
-
-func randomRootPassword() string {
-	return "Rancher-" + randomHex(16) + "aA1!"
 }
 
 func dnsLabel(value string) string {

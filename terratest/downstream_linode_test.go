@@ -5,27 +5,50 @@ import (
 	"testing"
 )
 
-func TestRenderLinodeDownstreamManifests(t *testing.T) {
+func TestRenderLinodeDownstreamResources(t *testing.T) {
 	cfg := downstreamProvisioningConfig{
 		ClusterName:  "test-cluster",
-		MachineName:  "test-cluster-pool1",
+		MachineName:  "nc-test-cluster-pool1-abc12",
 		SecretName:   "cc-test-cluster",
 		Namespace:    "fleet-default",
 		Region:       "us-ord",
 		InstanceType: "g6-standard-2",
 		Image:        "linode/ubuntu22.04",
 		K3SVersion:   "v1.33.4+k3s1",
-		RootPassword: "Rancher-test-aA1!",
-		Tags:         "ha-rancher-rke2,test-cluster",
 		LinodeToken:  "secret-token",
 	}
 
-	manifest := renderLinodeDownstreamManifests(cfg)
-	expected := []string{
+	secretManifest := renderLinodeCredentialSecretManifest(cfg)
+	secretExpected := []string{
 		"kind: Secret",
 		"linodecredentialConfig-token: \"secret-token\"",
-		"kind: LinodeConfig",
-		"instanceType: \"g6-standard-2\"",
+	}
+	for _, snippet := range secretExpected {
+		if !strings.Contains(secretManifest, snippet) {
+			t.Fatalf("expected secret manifest to contain %q:\n%s", snippet, secretManifest)
+		}
+	}
+
+	payload := linodeMachineConfigPayload(cfg)
+	if payload["type"] != "rke-machine-config.cattle.io.linodeconfig" {
+		t.Fatalf("unexpected machine config payload type: %#v", payload["type"])
+	}
+	if payload["image"] != "linode/ubuntu22.04" || payload["instanceType"] != "g6-standard-2" || payload["region"] != "us-ord" {
+		t.Fatalf("unexpected machine config payload: %#v", payload)
+	}
+	metadata, ok := payload["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("machine config payload metadata has unexpected shape: %#v", payload["metadata"])
+	}
+	if metadata["namespace"] != "fleet-default" || metadata["generateName"] != "nc-test-cluster-pool1-" {
+		t.Fatalf("unexpected machine config payload metadata: %#v", metadata)
+	}
+	if _, ok := payload["interfaces"].([]interface{}); !ok {
+		t.Fatalf("machine config payload interfaces has unexpected shape: %#v", payload["interfaces"])
+	}
+
+	clusterManifest := renderLinodeDownstreamClusterManifest(cfg)
+	expected := []string{
 		"kind: Cluster",
 		"cloudCredentialSecretName: \"cattle-global-data:cc-test-cluster\"",
 		"kubernetesVersion: \"v1.33.4+k3s1\"",
@@ -40,22 +63,20 @@ func TestRenderLinodeDownstreamManifests(t *testing.T) {
 		"quantity: 1",
 		"machineConfigRef:",
 		"kind: LinodeConfig",
+		"name: \"nc-test-cluster-pool1-abc12\"",
 		"controlPlaneConcurrency: \"1\"",
 	}
 
 	for _, snippet := range expected {
-		if !strings.Contains(manifest, snippet) {
-			t.Fatalf("expected manifest to contain %q:\n%s", snippet, manifest)
+		if !strings.Contains(clusterManifest, snippet) {
+			t.Fatalf("expected cluster manifest to contain %q:\n%s", snippet, clusterManifest)
 		}
 	}
 
-	if strings.Contains(manifest, "\ntype: rke-machine-config.cattle.io.linodeconfig\n") {
-		t.Fatalf("LinodeConfig manifest contains obsolete type field:\n%s", manifest)
+	if strings.Contains(clusterManifest, "apiVersion: rke-machine-config.cattle.io/v1") {
+		t.Fatalf("machineConfigRef contains API version that Rancher UI does not send:\n%s", clusterManifest)
 	}
 
-	if strings.Contains(manifest, "\n        apiVersion: rke-machine-config.cattle.io/v1\n") {
-		t.Fatalf("machineConfigRef contains API version that Rancher UI does not send:\n%s", manifest)
-	}
 }
 
 func TestDNSLabel(t *testing.T) {
