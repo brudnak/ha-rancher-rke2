@@ -354,7 +354,7 @@ func waitForProvisioningClusterDeleted(kubeconfigPath, namespace, clusterName st
 
 func resolveK3SDefaultVersion(kubeconfigPath string) (string, error) {
 	if explicit := strings.TrimSpace(os.Getenv("K3S_VERSION")); explicit != "" {
-		return explicit, nil
+		return normalizeK3SVersion(explicit), nil
 	}
 
 	output, err := runKubectlOutput(kubeconfigPath, "get", "settings.management.cattle.io", "k3s-default-version", "-o", "json")
@@ -371,12 +371,20 @@ func resolveK3SDefaultVersion(kubeconfigPath string) (string, error) {
 		return "", fmt.Errorf("failed to parse k3s-default-version setting: %w", err)
 	}
 	if strings.TrimSpace(setting.Value) != "" {
-		return strings.TrimSpace(setting.Value), nil
+		return normalizeK3SVersion(setting.Value), nil
 	}
 	if strings.TrimSpace(setting.Default) != "" {
-		return strings.TrimSpace(setting.Default), nil
+		return normalizeK3SVersion(setting.Default), nil
 	}
 	return "", fmt.Errorf("k3s-default-version setting was empty; set K3S_VERSION explicitly")
+}
+
+func normalizeK3SVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" || strings.HasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
 }
 
 func renderLinodeDownstreamManifests(cfg downstreamProvisioningConfig) string {

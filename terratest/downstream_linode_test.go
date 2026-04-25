@@ -55,6 +55,20 @@ func TestDNSLabel(t *testing.T) {
 	}
 }
 
+func TestNormalizeK3SVersion(t *testing.T) {
+	tests := map[string]string{
+		"1.35.3+k3s1":    "v1.35.3+k3s1",
+		" v1.34.6+k3s1 ": "v1.34.6+k3s1",
+		"":               "",
+	}
+
+	for input, expected := range tests {
+		if got := normalizeK3SVersion(input); got != expected {
+			t.Fatalf("normalizeK3SVersion(%q) = %q, want %q", input, got, expected)
+		}
+	}
+}
+
 func TestShortRunID(t *testing.T) {
 	if got := shortRunID("1234567890"); got != "34567890" {
 		t.Fatalf("shortRunID() = %q", got)
