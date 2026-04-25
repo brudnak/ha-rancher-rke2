@@ -222,20 +222,24 @@ jobs:
           set -euo pipefail
 
           env_file="automation-output/downstream-ha-1.env"
-          suites=("charts-webhook")
+          suites=("TestWebhookTestSuite")
           if [ "${{ inputs.lane }}" = "fresh-alpha-local-suites" ]; then
             env_file="automation-output/local-suite-ha-1.env"
             version="${{ inputs.rancher_version }}"
             version="${version#v}"
             IFS='.' read -r rancher_major rancher_minor _ <<< "$version"
-            suites=("frameworks-reg-configmaps")
+            suites=(
+              "TestConfigMapTestSuite"
+              "TestSchemaChangesTestSuite"
+              "TestNodeAnnotationsTestSuite"
+            )
             if [ "$rancher_major" -eq 2 ] && [ "$rancher_minor" -le 11 ]; then
-              suites+=("vai-disabled")
+              suites+=("TestVaiTestSuite/TestVaiDisabled")
             else
-              suites+=("vai-enabled")
+              suites+=("TestVaiTestSuite/TestVaiEnabled")
             fi
             if [ "$rancher_major" -gt 2 ] || { [ "$rancher_major" -eq 2 ] && [ "$rancher_minor" -ge 14 ]; }; then
-              suites+=("webhook-security-settings")
+              suites+=("TestWebhookSecuritySettingsTestSuite")
             fi
           fi
           if [ ! -s "$env_file" ]; then
@@ -306,44 +310,63 @@ jobs:
             fi
 
             case "$suite" in
-              charts-webhook)
+              TestWebhookTestSuite)
                 package="./validation/charts"
                 test_run="TestWebhookTestSuite"
                 tags="validation,infra.any,cluster.any"
                 timeout_args=()
+                junit_name="TestWebhookTestSuite"
                 ;;
-              frameworks-reg-configmaps)
+              TestConfigMapTestSuite)
                 package="./validation/configmaps"
                 test_run="TestConfigMapTestSuite"
                 tags="validation,infra.any,cluster.any"
                 timeout_args=()
+                junit_name="TestConfigMapTestSuite"
                 ;;
-              vai-enabled)
+              TestSchemaChangesTestSuite)
+                package="./validation/schemas"
+                test_run="TestSchemaChangesTestSuite"
+                tags="validation,infra.any,cluster.any"
+                timeout_args=()
+                junit_name="TestSchemaChangesTestSuite"
+                ;;
+              TestNodeAnnotationsTestSuite)
+                package="./validation/nodeannotations"
+                test_run="TestNodeAnnotationsTestSuite"
+                tags="validation,infra.any,cluster.any"
+                timeout_args=()
+                junit_name="TestNodeAnnotationsTestSuite"
+                ;;
+              TestVaiTestSuite/TestVaiEnabled)
                 package="./validation/steve/vai"
                 test_run="TestVaiTestSuite/TestVaiEnabled"
                 tags="validation,infra.any,cluster.any,extended"
                 timeout_args=("-timeout" "30m")
+                junit_name="TestVaiTestSuite-TestVaiEnabled"
                 ;;
-              vai-disabled)
+              TestVaiTestSuite/TestVaiDisabled)
                 package="./validation/steve/vai"
                 test_run="TestVaiTestSuite/TestVaiDisabled"
                 tags="validation,infra.any,cluster.any,extended"
                 timeout_args=("-timeout" "30m")
+                junit_name="TestVaiTestSuite-TestVaiDisabled"
                 ;;
-              webhook-security-settings)
+              TestWebhookSecuritySettingsTestSuite)
                 package="./validation/charts"
                 test_run="TestWebhookSecuritySettingsTestSuite"
                 tags="validation,infra.any,cluster.any"
                 timeout_args=()
+                junit_name="TestWebhookSecuritySettingsTestSuite"
                 ;;
               *)
-                echo "Unknown suite $suite"
+                echo "Unknown rancher/tests target $suite"
                 exit 1
                 ;;
             esac
 
-            junit="$GITHUB_WORKSPACE/test-results/${suite}.xml"
-            echo "Running rancher/tests suite $suite against cluster $CLUSTER_NAME"
+            junit="$GITHUB_WORKSPACE/test-results/${junit_name}.xml"
+            echo "Running rancher/tests $package -run $test_run against cluster $CLUSTER_NAME"
             set +e
             (
               cd "$tests_dir"
@@ -361,59 +384,7 @@ jobs:
               conclusion="failure"
               failed=1
             fi
-            append_result "$suite" "$package" "$test_run" "test-results/${suite}.xml" "$conclusion"
-
-            if [ "$suite" = "frameworks-reg-configmaps" ]; then
-              if [ "$suite_settle_seconds" -gt 0 ]; then
-                echo "Settling for ${suite_settle_seconds}s before frameworks-reg schemas"
-                sleep "$suite_settle_seconds"
-              fi
-              package="./validation/schemas"
-              test_run="TestSchemaChangesTestSuite"
-              junit="$GITHUB_WORKSPACE/test-results/frameworks-reg-schemas.xml"
-              set +e
-              (
-                cd "$tests_dir"
-                CATTLE_TEST_CONFIG="$config_path" gotestsum \
-                  --format standard-verbose \
-                  --junitfile "$junit" \
-                  -- \
-                  -v -tags="$tags" "$package" -run "$test_run"
-              )
-              exit_code=$?
-              set -e
-              conclusion="success"
-              if [ "$exit_code" -ne 0 ]; then
-                conclusion="failure"
-                failed=1
-              fi
-              append_result "frameworks-reg-schemas" "$package" "$test_run" "test-results/frameworks-reg-schemas.xml" "$conclusion"
-
-              if [ "$suite_settle_seconds" -gt 0 ]; then
-                echo "Settling for ${suite_settle_seconds}s before frameworks-reg node annotations"
-                sleep "$suite_settle_seconds"
-              fi
-              package="./validation/nodeannotations"
-              test_run="TestNodeAnnotationsTestSuite"
-              junit="$GITHUB_WORKSPACE/test-results/frameworks-reg-nodeannotations.xml"
-              set +e
-              (
-                cd "$tests_dir"
-                CATTLE_TEST_CONFIG="$config_path" gotestsum \
-                  --format standard-verbose \
-                  --junitfile "$junit" \
-                  -- \
-                  -v -tags="$tags" "$package" -run "$test_run"
-              )
-              exit_code=$?
-              set -e
-              conclusion="success"
-              if [ "$exit_code" -ne 0 ]; then
-                conclusion="failure"
-                failed=1
-              fi
-              append_result "frameworks-reg-nodeannotations" "$package" "$test_run" "test-results/frameworks-reg-nodeannotations.xml" "$conclusion"
-            fi
+            append_result "$test_run" "$package" "$test_run" "test-results/${junit_name}.xml" "$conclusion"
           done
 
           jq -n \
