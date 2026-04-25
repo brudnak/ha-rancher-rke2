@@ -78,6 +78,7 @@ func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T)
 
 	command := commands[0]
 	expectedSnippets := []string{
+		"--set tls=external",
 		"--set rancherImage=stgregistry.suse.com/rancher/rancher",
 		"--set rancherImageTag=v2.14.1-alpha3",
 		"--set 'extraEnv[0].name=CATTLE_AGENT_IMAGE'",
@@ -88,6 +89,9 @@ func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T)
 		if !strings.Contains(command, snippet) {
 			t.Fatalf("expected helm command to contain %q, got:\n%s", snippet, command)
 		}
+	}
+	if strings.Contains(command, "ingress.tls.source=secret") {
+		t.Fatalf("expected external TLS termination, got:\n%s", command)
 	}
 }
 
@@ -107,6 +111,7 @@ func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
 		"--install",
 		"--version 2.14.1-alpha6",
 		"--set hostname=placeholder",
+		"--set tls=external",
 		"--set rancherImage=stgregistry.suse.com/rancher/rancher",
 		"--set rancherImageTag=v2.14.1-alpha6",
 		"--set 'extraEnv[0].name=CATTLE_AGENT_IMAGE'",
@@ -120,6 +125,9 @@ func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
 		if !strings.Contains(command, snippet) {
 			t.Fatalf("expected helm command to contain %q, got:\n%s", snippet, command)
 		}
+	}
+	if strings.Contains(command, "ingress.tls.source=secret") {
+		t.Fatalf("expected external TLS termination, got:\n%s", command)
 	}
 }
 

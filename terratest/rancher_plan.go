@@ -730,7 +730,7 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 		"  --version " + chartVersion + " \\",
 		"  --set hostname=placeholder \\",
 		"  --set bootstrapPassword=" + bootstrapPassword + " \\",
-		"  --set ingress.tls.source=secret \\",
+		"  --set tls=external \\",
 		"  --set global.cattle.psp.enabled=false \\",
 		"  --set agentTLSMode=system-store",
 	}...)

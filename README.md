@@ -2,7 +2,7 @@
 
 Deploy Rancher High Availability (HA) clusters on AWS using RKE2 with automated setup and secure configuration.
 
-For the planned scheduled GitHub Actions alpha/webhook sign-off automation, see [docs/README.md](docs/README.md).
+For the scheduled GitHub Actions alpha/webhook sign-off automation, see [docs/README.md](docs/README.md).
 
 ## Key Features
 
@@ -10,10 +10,10 @@ For the planned scheduled GitHub Actions alpha/webhook sign-off automation, see 
 - **Secure by default** — HTTPS enabled from deployment
 - **Fully automated** — Rancher installation happens automatically
 - **Simple workflow:**
-  1. Configure your Helm commands in `tool-config.yml`
+  1. Configure `tool-config.yml`
   2. Run the test command
 
-Rancher is installed with `--set tls=external` since ACM certificates handle TLS termination.
+Generated Rancher Helm commands set `--set tls=external` because the AWS ALB terminates public TLS with ACM and forwards to Rancher over HTTP/80.
 
 ## Overview
 
@@ -36,7 +36,7 @@ Place `tool-config.yml` at the project root:
 ├── tool-config.yml
 ├── go.mod
 ├── terratest/
-│   └── test.go
+│   └── ha_test.go
 ├── modules/
 │   └── aws/
 ```
@@ -95,7 +95,7 @@ This starts a browser-based control panel bound to `127.0.0.1` only. It is separ
 
 `-count=1` is recommended here so `go test` does not reuse a cached prior success and immediately exit instead of starting a fresh panel.
 
-If you prefer using the IDE run button, `TestHAControlPanel` is also available alongside `TestHaSetup` and `TestHACleanup` in [terratest/ha_test.go](/Users/andrewbrudnak/github.com/brudnak/ha-rancher-rke2/terratest/ha_test.go).
+If you prefer using the IDE run button, `TestHAControlPanel` is also available alongside `TestHaSetup` and `TestHACleanup` in [terratest/ha_test.go](terratest/ha_test.go).
 
 ## Exact Test Runs
 
@@ -143,8 +143,8 @@ The cleanup button calls the existing canonical cleanup flow (`TestHACleanup`) r
 
 Use one of these checked-in examples as your starting point:
 
-- [tool-config.auto.example.yml](/Users/andrewbrudnak/github.com/brudnak/ha-rancher-rke2/tool-config.auto.example.yml)
-- [tool-config.manual.example.yml](/Users/andrewbrudnak/github.com/brudnak/ha-rancher-rke2/tool-config.manual.example.yml)
+- [tool-config.auto.example.yml](tool-config.auto.example.yml)
+- [tool-config.manual.example.yml](tool-config.manual.example.yml)
 
 Then copy the one you want to `tool-config.yml` and adjust the non-secret values.
 
@@ -176,7 +176,7 @@ If you do not want Docker Hub authentication, leave both Docker Hub environment 
 
 ### Sample `tool-config.yml`
 
-For available RKE2 Kubernetes versions, refer to: [RKE2 v1.32.X Release Notes](https://docs.rke2.io/release-notes/v1.32.X)
+For available RKE2 Kubernetes versions, refer to the [RKE2 release notes](https://docs.rke2.io/release-notes).
 
 ### Important Configuration Notes
 
@@ -204,19 +204,22 @@ For available RKE2 Kubernetes versions, refer to: [RKE2 v1.32.X Release Notes](h
   - If you set them, the tool creates `/etc/rancher/rke2/registries.yaml` so RKE2 can authenticate to Docker Hub
   - If you leave them unset, the tool skips Docker Hub authentication
 - In `auto` mode, the tool prints a resolved plan for each HA and asks you to continue before provisioning starts
-- All `curl` downloads are checksum-validated before use — no `curl | bash` patterns exist in this project
+- RKE2 installer and image downloads are checksum-validated before use; the install path does not use `curl | bash`
 
 ### Supply chain security
 
-Every file downloaded over the network is verified against a known-good SHA256 before it is used or executed. This protects against compromised upstream releases (e.g. a tampered GitHub release asset) reaching your nodes.
+RKE2 artifacts downloaded onto cluster nodes are checksum-verified before they
+are used. This protects against a compromised upstream release asset, or a
+tampered download in transit, reaching the node bootstrap path.
 
 | Pattern | Location | Status |
 |---|---|---|
-| `curl \| bash` | — | Eliminated — no instances exist |
-| RKE2 installer curl | [preflight.go:302](terratest/preflight.go#L302) | Hardened — SHA256 validated twice (Go + bash) |
-| RKE2 images curl | [preflight.go:274](terratest/preflight.go#L274), [cluster_setup.go:210](terratest/cluster_setup.go#L210), [cluster_setup.go:437](terratest/cluster_setup.go#L437) | Hardened — SHA256 validated via official release checksum file |
+| `curl \| bash` for RKE2 install | — | Eliminated — the installer is downloaded to a temp file, verified, then executed |
+| RKE2 installer download | [terratest/preflight.go](terratest/preflight.go), [terratest/rancher_plan.go](terratest/rancher_plan.go) | Hardened — SHA256 is resolved or required before provisioning, then verified by Go preflight |
+| RKE2 remote installer execution | [terratest/preflight.go](terratest/preflight.go), [terratest/cluster_setup.go](terratest/cluster_setup.go) | Hardened — remote bash verifies the same SHA256 before running `install.sh` |
+| RKE2 image tarball preload | [terratest/preflight.go](terratest/preflight.go), [terratest/cluster_setup.go](terratest/cluster_setup.go) | Hardened — `rke2-images.linux-amd64.tar.zst` is validated with the official release checksum file before it is moved into place |
 
-**RKE2 installer script** (`preflight.go`, `cluster_setup.go`)
+**RKE2 installer script**
 
 The installer is validated twice — once in Go before provisioning starts, and once in bash on the remote node:
 
@@ -226,9 +229,9 @@ The installer is validated twice — once in Go before provisioning starts, and 
 Where the expected hash comes from depends on mode:
 
 - **`manual` mode** — you supply `rke2.install_script_sha256` (single HA) or `rke2.install_script_sha256s` (multiple HAs) explicitly in your config. The tool checks your pinned value before any node is touched.
-- **`auto` mode** — the tool fetches the versioned `install.sh` at plan time, computes its SHA256, and stores it in the resolved plan. That computed hash is then used for both the Go preflight check and the per-node bash validation, so the same two-step process applies in both modes.
+- **`auto` mode** — the tool fetches the versioned `install.sh` while resolving the plan, computes its SHA256, and stores it in the resolved plan. That computed hash is then used for both the Go preflight check and the per-node bash validation, so the same two-step process applies in both modes.
 
-**RKE2 images tarball** (`preflight.go`, `cluster_setup.go`)
+**RKE2 images tarball**
 
 When `rke2.preload_images: true` is set, the image bundle is also validated before it is moved into place. This applies equally in `manual` and `auto` modes — in both cases the RKE2 version is known before the download starts (from your config in manual mode, from the resolved plan in auto mode), so the same validation runs regardless:
 
@@ -246,7 +249,7 @@ rancher:
   mode: auto
   versions:
     - "2.13-head"
-    - "2.14.0"
+    - "2.13.4"
   distro: auto
   bootstrap_password: "your-password"
   auto_approve: false
@@ -305,24 +308,25 @@ rancher:
   mode: manual
   helm_commands:
     - |
-      helm install rancher rancher-latest/rancher \
+      helm install rancher rancher-prime/rancher \
         --namespace cattle-system \
+        --version 2.13.4 \
         --set hostname=placeholder \
         --set bootstrapPassword=your-password \
         --set tls=external \
         --set global.cattle.psp.enabled=false \
-        --set rancherImageTag=v2.14.0 \
-        --version 2.14.0 \
+        --set rancherImage=registry.rancher.com/rancher/rancher \
+        --set rancherImageTag=v2.13.4 \
         --set agentTLSMode=system-store
     - |
       helm install rancher rancher-latest/rancher \
         --namespace cattle-system \
+        --version 2.14.0 \
         --set hostname=placeholder \
         --set bootstrapPassword=your-password \
         --set tls=external \
         --set global.cattle.psp.enabled=false \
         --set rancherImageTag=v2.14.0 \
-        --version 2.14.0 \
         --set agentTLSMode=system-store
 
 total_has: 2

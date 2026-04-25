@@ -7,7 +7,7 @@ rancher:
         --version 2.13.4 \
         --set hostname=placeholder \
         --set bootstrapPassword=change-me \
-        --set ingress.tls.source=secret \
+        --set tls=external \
         --set global.cattle.psp.enabled=false \
         --set rancherImage=registry.rancher.com/rancher/rancher \
         --set rancherImageTag=v2.13.4 \
@@ -18,7 +18,7 @@ rancher:
         --version 2.14.0 \
         --set hostname=placeholder \
         --set bootstrapPassword=change-me \
-        --set ingress.tls.source=secret \
+        --set tls=external \
         --set global.cattle.psp.enabled=false \
         --set rancherImageTag=v2.14.0 \
         --set agentTLSMode=system-store

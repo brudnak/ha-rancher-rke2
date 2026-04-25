@@ -96,7 +96,8 @@ resource "aws_instance" "aws_instance" {
   }
 }
 
-# Application Load Balancer for Rancher UI (80/443)
+# Application Load Balancer for Rancher UI. Public TLS terminates at the ALB,
+# then forwards to Rancher's HTTP ingress because Helm uses tls=external.
 resource "aws_lb_target_group" "aws_lb_target_group_80" {
   name        = "${local.target_group_prefix}-80"
   port        = 80
@@ -111,32 +112,11 @@ resource "aws_lb_target_group" "aws_lb_target_group_80" {
   }
 }
 
-resource "aws_lb_target_group" "aws_lb_target_group_443" {
-  name        = "${local.target_group_prefix}-443"
-  port        = 443
-  protocol    = "HTTPS"
-  target_type = "instance"
-  vpc_id      = var.aws_vpc
-  health_check {
-    protocol          = "HTTPS"
-    port              = 443
-    healthy_threshold = 3
-    interval          = 10
-  }
-}
-
 resource "aws_lb_target_group_attachment" "attach_tg_80" {
   count            = length(aws_instance.aws_instance)
   target_group_arn = aws_lb_target_group.aws_lb_target_group_80.arn
   target_id        = aws_instance.aws_instance[count.index].id
   port             = 80
-}
-
-resource "aws_lb_target_group_attachment" "attach_tg_443" {
-  count            = length(aws_instance.aws_instance)
-  target_group_arn = aws_lb_target_group.aws_lb_target_group_443.arn
-  target_id        = aws_instance.aws_instance[count.index].id
-  port             = 443
 }
 
 resource "aws_lb" "aws_lb" {
@@ -208,7 +188,7 @@ resource "aws_lb_listener" "aws_lb_listener_443" {
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.aws_lb_target_group_443.arn
+    target_group_arn = aws_lb_target_group.aws_lb_target_group_80.arn
   }
 }
 
