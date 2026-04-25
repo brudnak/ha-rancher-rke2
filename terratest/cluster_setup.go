@@ -256,6 +256,10 @@ func setupFirstServerNode(ip string, haOutputs TerraformOutputs, resolvedPlan *R
 		log.Printf("[setupFirstServerNode] No Docker Hub credentials provided, skipping registries.yaml creation")
 	}
 
+	if err := configureRKE2IngressForExternalTLS(ip); err != nil {
+		return fmt.Errorf("failed to configure RKE2 ingress for external TLS: %w", err)
+	}
+
 	log.Printf("[setupFirstServerNode] Installing RKE2 version %s...", rke2K8sVersion)
 	cmd, err = buildRKE2InstallCommand("server", rke2K8sVersion, expectedInstallerSHA256)
 	if err != nil {
@@ -383,6 +387,38 @@ func getNodeToken(ip string) (string, error) {
 	return token, nil
 }
 
+func configureRKE2IngressForExternalTLS(ip string) error {
+	log.Printf("[rke2-ingress] Enabling forwarded headers for external TLS termination on %s", ip)
+
+	cmd := "sudo mkdir -p /var/lib/rancher/rke2/server/manifests"
+	if output, err := RunCommand(cmd, ip); err != nil {
+		log.Printf("[rke2-ingress] FAILED to create manifests directory on %s: %v", ip, err)
+		return fmt.Errorf("failed to create manifests directory: %w; output: %s", err, output)
+	}
+
+	manifest := rke2IngressNginxConfigManifest()
+	cmd = fmt.Sprintf("sudo bash -c 'cat > /var/lib/rancher/rke2/server/manifests/rke2-ingress-nginx-config.yaml << EOL\n%s\nEOL'", manifest)
+	if output, err := RunCommand(cmd, ip); err != nil {
+		log.Printf("[rke2-ingress] FAILED to write forwarded headers config on %s: %v", ip, err)
+		return fmt.Errorf("failed to write rke2 ingress config: %w; output: %s", err, output)
+	}
+
+	return nil
+}
+
+func rke2IngressNginxConfigManifest() string {
+	return `apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-ingress-nginx
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    controller:
+      config:
+        use-forwarded-headers: "true"`
+}
+
 func setupAdditionalServerNode(ip, token string, haOutputs TerraformOutputs, resolvedPlan *RancherResolvedPlan) error {
 	rke2K8sVersion := viper.GetString("k8s.version")
 	expectedInstallerSHA256 := viper.GetString("rke2.install_script_sha256")
@@ -478,6 +514,10 @@ tls-san:
 		log.Printf("[setupAdditionalServerNode] Docker Hub authentication configured for %s", ip)
 	} else {
 		log.Printf("[setupAdditionalServerNode] No Docker Hub credentials provided, skipping registries.yaml creation for %s", ip)
+	}
+
+	if err := configureRKE2IngressForExternalTLS(ip); err != nil {
+		return fmt.Errorf("failed to configure RKE2 ingress for external TLS: %w", err)
 	}
 
 	log.Printf("[setupAdditionalServerNode] Installing RKE2 version %s on %s...", rke2K8sVersion, ip)

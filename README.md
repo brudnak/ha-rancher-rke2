@@ -13,7 +13,7 @@ For the scheduled GitHub Actions alpha/webhook sign-off automation, see [docs/RE
   1. Configure `tool-config.yml`
   2. Run the test command
 
-Generated Rancher Helm commands set `--set tls=external` because the AWS ALB terminates public TLS with ACM and forwards to Rancher over HTTP/80.
+Generated Rancher Helm commands set `--set tls=external` because the AWS ALB terminates public TLS with ACM and forwards to Rancher over HTTP/80. RKE2 ingress is configured with `use-forwarded-headers: "true"` so Rancher sees the original HTTPS request and avoids redirect loops.
 
 ## Overview
 
