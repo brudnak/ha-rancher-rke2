@@ -29,12 +29,18 @@ func TestRenderLinodeDownstreamManifests(t *testing.T) {
 		"kind: Cluster",
 		"cloudCredentialSecretName: \"cattle-global-data:cc-test-cluster\"",
 		"kubernetesVersion: \"v1.33.4+k3s1\"",
+		"defaultPodSecurityAdmissionConfigurationTemplateName: \"\"",
+		"disable-cloud-controller: false",
+		"machineSelectorConfig:",
+		"protect-kernel-defaults: false",
+		"registries:",
 		"controlPlaneRole: true",
 		"etcdRole: true",
 		"workerRole: true",
 		"quantity: 1",
 		"machineConfigRef:",
-		"apiVersion: rke-machine-config.cattle.io/v1",
+		"kind: LinodeConfig",
+		"controlPlaneConcurrency: \"1\"",
 	}
 
 	for _, snippet := range expected {
@@ -45,6 +51,10 @@ func TestRenderLinodeDownstreamManifests(t *testing.T) {
 
 	if strings.Contains(manifest, "\ntype: rke-machine-config.cattle.io.linodeconfig\n") {
 		t.Fatalf("LinodeConfig manifest contains obsolete type field:\n%s", manifest)
+	}
+
+	if strings.Contains(manifest, "\n        apiVersion: rke-machine-config.cattle.io/v1\n") {
+		t.Fatalf("machineConfigRef contains API version that Rancher UI does not send:\n%s", manifest)
 	}
 }
 

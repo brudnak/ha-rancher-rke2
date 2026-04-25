@@ -86,6 +86,7 @@ jobs:
       DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
       RANCHER_TESTS_REF: ${{ vars.RANCHER_TESTS_REF }}
       RANCHER_TEST_SUITE_SETTLE_SECONDS: ${{ vars.RANCHER_TEST_SUITE_SETTLE_SECONDS }}
+      SIGNOFF_LANE: ${{ inputs.lane }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -135,6 +136,7 @@ jobs:
 
       - name: Build automation tools
         run: |
+          chmod +x .github/scripts/run-with-cancel-cleanup.sh
           go build -o "$RUNNER_TEMP/signoff-plan" ./automation/signoff-plan
           go build -o "$RUNNER_TEMP/signoff-ledger" ./automation/signoff-ledger
           go build -o "$RUNNER_TEMP/render-tool-config" ./automation/render-tool-config
@@ -181,11 +183,11 @@ jobs:
 
       - name: Run lane setup
         id: setup
-        run: go test -v -run '^TestHaSetup$' -timeout 90m ./terratest
+        run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHaSetup$' -timeout 90m ./terratest
 
       - name: Wait for lane readiness
         id: ready
-        run: go test -v -run '^TestHAWaitReady$' -timeout 35m ./terratest
+        run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHAWaitReady$' -timeout 35m ./terratest
 
       - name: Export local suite env
         id: local_suite_env
@@ -199,22 +201,22 @@ jobs:
       - name: Provision downstream Linode K3s
         id: downstream
         if: ${{ inputs.lane != 'fresh-alpha-local-suites' }}
-        run: go test -v -run '^TestHAProvisionLinodeDownstream$' -timeout 55m ./terratest
+        run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHAProvisionLinodeDownstream$' -timeout 55m ./terratest
 
       - name: Override local webhook image
         id: local_webhook
         if: ${{ inputs.lane == 'previous-with-candidate-webhook' }}
-        run: go test -v -run '^TestHAOverrideLocalWebhook$' -timeout 30m ./terratest
+        run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHAOverrideLocalWebhook$' -timeout 30m ./terratest
 
       - name: Override downstream webhook image
         id: downstream_webhook
         if: ${{ inputs.lane == 'previous-with-candidate-webhook' }}
-        run: go test -v -run '^TestHAOverrideDownstreamWebhook$' -timeout 20m ./terratest
+        run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHAOverrideDownstreamWebhook$' -timeout 20m ./terratest
 
       - name: Run Rancher upgrade
         id: upgrade
         if: ${{ inputs.lane == 'upgrade-alpha' }}
-        run: go test -v -run '^TestHAUpgradeRancher$' -timeout 45m ./terratest
+        run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHAUpgradeRancher$' -timeout 45m ./terratest
 
       - name: Run Rancher tests
         id: rancher_tests
@@ -222,7 +224,7 @@ jobs:
         env:
           INPUT_RANCHER_TESTS_REF: ${{ github.event.inputs.rancher_tests_ref || '' }}
         run: |
-          set -euo pipefail
+          .github/scripts/run-with-cancel-cleanup.sh bash -euo pipefail <<'SCRIPT'
 
           env_file="automation-output/downstream-ha-1.env"
           suites=("TestWebhookTestSuite")
@@ -420,6 +422,7 @@ jobs:
           if [ "$failed" -ne 0 ]; then
             exit 1
           fi
+          SCRIPT
 
       - name: Refresh AWS credentials before cleanup
         if: ${{ always() }}

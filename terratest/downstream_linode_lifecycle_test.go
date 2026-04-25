@@ -428,18 +428,42 @@ metadata:
 spec:
   cloudCredentialSecretName: %s
   kubernetesVersion: %s
+  defaultPodSecurityAdmissionConfigurationTemplateName: ""
   localClusterAuthEndpoint:
     enabled: false
   rkeConfig:
+    chartValues: {}
+    dataDirectories:
+      systemAgent: ""
+      provisioning: ""
+      k8sDistro: ""
     etcd:
+      disableSnapshots: false
+      s3: null
       snapshotRetention: 5
       snapshotScheduleCron: "0 */5 * * *"
     machineGlobalConfig:
-      cni: calico
+      disable-apiserver: false
+      disable-cloud-controller: false
+      disable-controller-manager: false
+      disable-etcd: false
       disable-kube-proxy: false
+      disable-network-policy: false
+      disable-scheduler: false
       etcd-expose-metrics: false
+      etcd-s3-bucket-lookup-type: auto
       ingress-controller: traefik
-      profile: null
+      secrets-encryption: false
+      secrets-encryption-provider: aescbc
+    machineSelectorConfig:
+    - config:
+        docker: false
+        protect-kernel-defaults: false
+        selinux: false
+    networking: {}
+    registries:
+      configs: {}
+      mirrors: {}
     machinePools:
     - name: pool1
       controlPlaneRole: true
@@ -447,15 +471,33 @@ spec:
       workerRole: true
       quantity: 1
       drainBeforeDelete: true
+      hostnamePrefix: ""
+      labels: {}
+      unhealthyNodeTimeout: "0m"
       machineConfigRef:
-        apiVersion: rke-machine-config.cattle.io/v1
         kind: LinodeConfig
         name: %s
     upgradeStrategy:
-      controlPlaneConcurrency: "10%%"
-      controlPlaneDrainOptions: {}
-      workerConcurrency: "10%%"
-      workerDrainOptions: {}
+      controlPlaneConcurrency: "1"
+      controlPlaneDrainOptions:
+        deleteEmptyDirData: true
+        disableEviction: false
+        enabled: false
+        force: false
+        gracePeriod: -1
+        ignoreDaemonSets: true
+        skipWaitForDeleteTimeoutSeconds: 0
+        timeout: 120
+      workerConcurrency: "1"
+      workerDrainOptions:
+        deleteEmptyDirData: true
+        disableEviction: false
+        enabled: false
+        force: false
+        gracePeriod: -1
+        ignoreDaemonSets: true
+        skipWaitForDeleteTimeoutSeconds: 0
+        timeout: 120
 `,
 		yamlScalar(cfg.SecretName),
 		yamlScalar(cfg.SecretName),
