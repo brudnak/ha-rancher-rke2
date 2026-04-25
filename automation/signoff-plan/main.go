@@ -51,6 +51,13 @@ type plan struct {
 	GeneratedAt          string        `json:"generated_at"`
 }
 
+type planSet struct {
+	Mode        string `json:"mode"`
+	MaxAgeDays  int    `json:"max_age_days"`
+	Plans       []plan `json:"plans"`
+	GeneratedAt string `json:"generated_at"`
+}
+
 type lane struct {
 	Name                 string `json:"name"`
 	InstallRancher       string `json:"install_rancher"`
@@ -65,6 +72,16 @@ type lane struct {
 type skippedLane struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
+}
+
+type signoffLedger struct {
+	Entries map[string]map[string]ledgerEntry `json:"entries"`
+}
+
+type ledgerEntry struct {
+	Status      string `json:"status"`
+	RunID       string `json:"run_id"`
+	CompletedAt string `json:"completed_at"`
 }
 
 type semver struct {
@@ -96,7 +113,11 @@ func main() {
 	var outputPath string
 	var runID string
 	var stateKeyRoot string
+	var ledgerPath string
 	var latestAlpha bool
+	var latestAlphaPerLine bool
+	var ignoreLedger bool
+	var maxAgeDays int
 
 	flag.StringVar(&targetVersion, "rancher-version", "", "target Rancher alpha tag, for example v2.14.1-alpha6")
 	flag.StringVar(&previousVersion, "previous-rancher-version", "", "previous Rancher release tag; resolved automatically when omitted")
@@ -105,7 +126,11 @@ func main() {
 	flag.StringVar(&outputPath, "output", "", "optional JSON output path")
 	flag.StringVar(&runID, "run-id", os.Getenv("GITHUB_RUN_ID"), "workflow run id used to generate per-lane Terraform state keys")
 	flag.StringVar(&stateKeyRoot, "state-key-root", "ha-rancher-rke2/signoff", "root prefix for generated Terraform state keys")
+	flag.StringVar(&ledgerPath, "ledger", "signoff-ledger.json", "sign-off ledger path used to skip already successful lanes")
 	flag.BoolVar(&latestAlpha, "latest-alpha", false, "resolve the latest Rancher alpha from GitHub releases")
+	flag.BoolVar(&latestAlphaPerLine, "latest-alpha-per-line", false, "resolve the latest Rancher alpha per vX.Y release line from GitHub releases")
+	flag.BoolVar(&ignoreLedger, "ignore-ledger", false, "ignore sign-off ledger entries when rendering lanes")
+	flag.IntVar(&maxAgeDays, "max-age-days", 30, "maximum alpha release age in days for -latest-alpha-per-line")
 	flag.Parse()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -116,6 +141,39 @@ func main() {
 		httpClient: &http.Client{
 			Timeout: 20 * time.Second,
 		},
+	}
+	ledger, err := readLedger(ledgerPath)
+	if err != nil {
+		fatalf("read ledger: %v", err)
+	}
+
+	if latestAlpha && latestAlphaPerLine {
+		fatalf("set only one of -latest-alpha or -latest-alpha-per-line")
+	}
+
+	if latestAlphaPerLine {
+		targets, err := client.latestAlphasPerLine(ctx, time.Duration(maxAgeDays)*24*time.Hour)
+		if err != nil {
+			fatalf("resolve latest alpha per line: %v", err)
+		}
+		plans := make([]plan, 0, len(targets))
+		for _, version := range targets {
+			p, err := buildPlan(ctx, client, version, previousVersion, webhookImage, signingPolicy, runID, stateKeyRoot)
+			if err != nil {
+				fatalf("build sign-off plan for %s: %v", version, err)
+			}
+			if !ignoreLedger {
+				p = applyLedgerSkips(p, ledger)
+			}
+			plans = append(plans, p)
+		}
+		writeJSON(planSet{
+			Mode:        "latest-alpha-per-line",
+			MaxAgeDays:  maxAgeDays,
+			Plans:       plans,
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		}, outputPath)
+		return
 	}
 
 	if latestAlpha {
@@ -134,8 +192,15 @@ func main() {
 	if err != nil {
 		fatalf("build sign-off plan: %v", err)
 	}
+	if !ignoreLedger {
+		p = applyLedgerSkips(p, ledger)
+	}
 
-	data, err := json.MarshalIndent(p, "", "  ")
+	writeJSON(p, outputPath)
+}
+
+func writeJSON(value interface{}, outputPath string) {
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		fatalf("render plan JSON: %v", err)
 	}
@@ -262,6 +327,56 @@ func buildPlan(ctx context.Context, client githubClient, targetVersion, previous
 	}, nil
 }
 
+func readLedger(path string) (signoffLedger, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return signoffLedger{}, nil
+	}
+	if err != nil {
+		return signoffLedger{}, err
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return signoffLedger{}, nil
+	}
+	var ledger signoffLedger
+	if err := json.Unmarshal(data, &ledger); err != nil {
+		return signoffLedger{}, err
+	}
+	return ledger, nil
+}
+
+func applyLedgerSkips(p plan, ledger signoffLedger) plan {
+	if ledger.Entries == nil {
+		return p
+	}
+	byLane := ledger.Entries[p.TargetVersion]
+	if len(byLane) == 0 {
+		return p
+	}
+	remaining := make([]lane, 0, len(p.Lanes))
+	for _, lane := range p.Lanes {
+		entry, ok := byLane[lane.Name]
+		if !ok || entry.Status != "success" {
+			remaining = append(remaining, lane)
+			continue
+		}
+		reason := fmt.Sprintf("Already recorded successful sign-off for %s/%s", p.TargetVersion, lane.Name)
+		var details []string
+		if entry.RunID != "" {
+			details = append(details, "run "+entry.RunID)
+		}
+		if entry.CompletedAt != "" {
+			details = append(details, "completed "+entry.CompletedAt)
+		}
+		if len(details) > 0 {
+			reason += " (" + strings.Join(details, ", ") + ")"
+		}
+		p.SkippedLanes = append(p.SkippedLanes, skippedLane{Name: lane.Name, Reason: reason})
+	}
+	p.Lanes = remaining
+	return p
+}
+
 func applyLaneRuntimeFields(lanes []lane, targetVersion, releaseLine, runID, stateKeyRoot string) {
 	runID = strings.TrimSpace(runID)
 	stateKeyRoot = strings.Trim(strings.TrimSpace(stateKeyRoot), "/")
@@ -346,6 +461,63 @@ func (c githubClient) latestAlpha(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("no alpha release found in recent %s releases", rancherRepo)
 }
 
+func (c githubClient) latestAlphasPerLine(ctx context.Context, maxAge time.Duration) ([]string, error) {
+	releases, err := c.releases(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	cutoff := time.Now().UTC().Add(-maxAge)
+	targets := latestAlphasPerLineFromReleases(releases, cutoff)
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no alpha release found in recent %s releases", rancherRepo)
+	}
+	return targets, nil
+}
+
+func latestAlphasPerLineFromReleases(releases []release, cutoff time.Time) []string {
+	byLine := map[string]semver{}
+	for _, release := range releases {
+		if !release.Prerelease {
+			continue
+		}
+		parsed, err := parseAlphaVersion(release.TagName)
+		if err != nil {
+			continue
+		}
+		if release.PublishedAt != "" {
+			publishedAt, err := time.Parse(time.RFC3339, release.PublishedAt)
+			if err != nil {
+				continue
+			}
+			if publishedAt.Before(cutoff) {
+				continue
+			}
+		}
+		line := fmt.Sprintf("v%d.%d", parsed.Major, parsed.Minor)
+		if current, ok := byLine[line]; !ok || semverLess(current, parsed) {
+			byLine[line] = parsed
+		}
+	}
+	if len(byLine) == 0 {
+		return nil
+	}
+
+	lines := make([]string, 0, len(byLine))
+	for line := range byLine {
+		lines = append(lines, line)
+	}
+	sort.Slice(lines, func(i, j int) bool {
+		return semverLess(byLine[lines[j]], byLine[lines[i]])
+	})
+
+	targets := make([]string, 0, len(lines))
+	for _, line := range lines {
+		targets = append(targets, normalizeTag(byLine[line].Raw))
+	}
+	return targets
+}
+
 func (c githubClient) resolvePreviousRelease(ctx context.Context, target semver) (string, error) {
 	if target.Patch > 0 {
 		candidate := fmt.Sprintf("v%d.%d.%d", target.Major, target.Minor, target.Patch-1)
@@ -387,6 +559,19 @@ func (c githubClient) resolvePreviousRelease(ctx context.Context, target semver)
 	})
 
 	return normalizeTag(candidates[0].Raw), nil
+}
+
+func semverLess(a, b semver) bool {
+	if a.Major != b.Major {
+		return a.Major < b.Major
+	}
+	if a.Minor != b.Minor {
+		return a.Minor < b.Minor
+	}
+	if a.Patch != b.Patch {
+		return a.Patch < b.Patch
+	}
+	return a.Alpha < b.Alpha
 }
 
 func (c githubClient) releaseExists(ctx context.Context, tag string) (bool, error) {

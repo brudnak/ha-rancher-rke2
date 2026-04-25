@@ -1,4 +1,5 @@
 name: Rancher Alpha Smoke
+run-name: Smoke ${{ inputs.rancher_version }} / ${{ inputs.lane }}
 
 on:
   workflow_dispatch:
@@ -51,7 +52,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 concurrency:
@@ -89,7 +90,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          persist-credentials: false
+          ref: ${{ github.ref_name }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
@@ -135,6 +136,7 @@ jobs:
       - name: Build automation tools
         run: |
           go build -o "$RUNNER_TEMP/signoff-plan" ./automation/signoff-plan
+          go build -o "$RUNNER_TEMP/signoff-ledger" ./automation/signoff-ledger
           go build -o "$RUNNER_TEMP/render-tool-config" ./automation/render-tool-config
           go build -o "$RUNNER_TEMP/render-signoff-report" ./automation/render-signoff-report
 
@@ -149,6 +151,7 @@ jobs:
             "-rancher-version" "${{ inputs.rancher_version }}"
             "-signing-policy" "${{ inputs.signing_policy }}"
             "-run-id" "${{ github.run_id }}"
+            "-ignore-ledger"
             "-output" "signoff-plan.json"
           )
           if [ -n "$INPUT_PREVIOUS_RANCHER_VERSION" ]; then
@@ -454,6 +457,35 @@ jobs:
             automation-output/signoff-report.md
             automation-output/*.json
             test-results/*.xml
+
+      - name: Record successful sign-off lane
+        if: ${{ success() }}
+        env:
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --ff-only origin "${GITHUB_REF_NAME}"
+
+          "$RUNNER_TEMP/signoff-ledger" \
+            -plan signoff-plan.json \
+            -ledger signoff-ledger.json \
+            -lane "${{ inputs.lane }}" \
+            -status success \
+            -run-id "${{ github.run_id }}" \
+            -run-url "$RUN_URL" \
+            -workflow "${{ github.workflow }}" \
+            -commit-sha "${{ github.sha }}"
+
+          git add signoff-ledger.json
+          if git diff --cached --quiet; then
+            echo "No sign-off ledger changes to commit."
+            exit 0
+          fi
+          git commit -m "Record sign-off ${{ inputs.rancher_version }} ${{ inputs.lane }}"
+          git push
 
       - name: Write step summary
         if: always()

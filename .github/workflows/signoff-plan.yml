@@ -1,10 +1,11 @@
 name: Plan Webhook Sign-Off
+run-name: ${{ github.event.inputs.rancher_version && format('Plan Webhook Sign-Off {0}', github.event.inputs.rancher_version) || 'Plan Webhook Sign-Off latest per line' }}
 
 on:
   workflow_dispatch:
     inputs:
       rancher_version:
-        description: Target Rancher alpha, for example v2.14.1-alpha6. Leave blank to use latest alpha.
+        description: Target Rancher alpha, for example v2.14.1-alpha6. Leave blank to use latest alpha per release line.
         required: false
         type: string
       previous_rancher_version:
@@ -26,7 +27,8 @@ on:
           - report-only
           - skip
   schedule:
-    - cron: "17 3,11,19 * * *"
+    # everything is 19
+    - cron: "19 3,11,19 * * *"
 
 permissions:
   contents: read
@@ -63,7 +65,7 @@ jobs:
           if [ -n "$INPUT_RANCHER_VERSION" ]; then
             args+=("-rancher-version" "$INPUT_RANCHER_VERSION")
           else
-            args+=("-latest-alpha")
+            args+=("-latest-alpha-per-line")
           fi
           if [ -n "$INPUT_PREVIOUS_RANCHER_VERSION" ]; then
             args+=("-previous-rancher-version" "$INPUT_PREVIOUS_RANCHER_VERSION")

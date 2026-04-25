@@ -136,7 +136,7 @@ func renderReport(plan signoffPlan, outputDir, activeLane string, generatedAt ti
 	}
 
 	writeMetadataTable(&b, "Downstream Linode", downstream, []string{"ha_index", "cluster_name", "management_cluster_id", "k3s_version", "linode_region", "linode_type"})
-	writeMetadataTable(&b, "Local Suite Targets", localSuites, []string{"ha_index", "rancher_host", "cluster_name"})
+	writeMetadataTable(&b, "Local Suite Targets", localSuites, []string{"ha_index", "cluster_name"})
 	writeMetadataTable(&b, "Webhook Overrides", overrides, []string{"scope", "ha_index", "cluster_name", "namespace", "deployment", "container", "previous_image", "candidate_image"})
 	writeMetadataTable(&b, "Rancher Test Runs", rancherTestRuns, []string{"repo", "ref", "lane", "rancher_version"})
 	writeMetadataTable(&b, "Rancher Test Results", rancherTests, []string{"repo", "ref", "lane", "suite", "package", "test_run", "junit", "conclusion"})

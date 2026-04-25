@@ -81,7 +81,7 @@ func writeSuiteEnvOutput(instanceNum int, clusterName string, haOutputs Terrafor
 	jsonPath := filepath.Join(outputDir, fmt.Sprintf("%s-ha-%d.json", name, instanceNum))
 	payload := map[string]interface{}{
 		"ha_index":     instanceNum,
-		"rancher_host": clickableURL(haOutputs.RancherURL),
+		"rancher_host": "<masked>",
 		"cluster_name": clusterName,
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWebhookTagFromBuild(t *testing.T) {
@@ -136,6 +137,48 @@ func TestBuildTerraformStateKey(t *testing.T) {
 	want := "root/v2.14/v2.14.1-alpha6/123/fresh-alpha/terraform.tfstate"
 	if got != want {
 		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestLatestAlphasPerLineReturnsNewestRecentAlphaPerLine(t *testing.T) {
+	targets := latestAlphasPerLineFromReleases([]release{
+		{TagName: "v2.14.1-alpha7", Prerelease: true, PublishedAt: "2026-04-24T12:00:00Z"},
+		{TagName: "v2.13.5-alpha6", Prerelease: true, PublishedAt: "2026-04-24T11:00:00Z"},
+		{TagName: "v2.14.1-alpha6", Prerelease: true, PublishedAt: "2026-04-23T12:00:00Z"},
+		{TagName: "v2.12.9-alpha6", Prerelease: true, PublishedAt: "2026-04-24T10:00:00Z"},
+		{TagName: "v2.15.0-alpha2", Prerelease: true, PublishedAt: "2026-03-01T12:00:00Z"},
+		{TagName: "v2.14.0", Prerelease: false, PublishedAt: "2026-04-20T12:00:00Z"},
+	}, time.Date(2026, 3, 26, 0, 0, 0, 0, time.UTC))
+	want := []string{"v2.14.1-alpha7", "v2.13.5-alpha6", "v2.12.9-alpha6"}
+	if strings.Join(targets, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected %v, got %v", want, targets)
+	}
+}
+
+func TestApplyLedgerSkipsSuccessfulLanes(t *testing.T) {
+	plan := plan{
+		TargetVersion: "v2.14.1-alpha7",
+		Lanes: []lane{
+			{Name: laneFreshAlpha},
+			{Name: laneUpgradeAlpha},
+		},
+	}
+	ledger := signoffLedger{Entries: map[string]map[string]ledgerEntry{
+		"v2.14.1-alpha7": {
+			laneFreshAlpha: {
+				Status:      "success",
+				RunID:       "123",
+				CompletedAt: "2026-04-25T00:00:00Z",
+			},
+		},
+	}}
+
+	got := applyLedgerSkips(plan, ledger)
+	if len(got.Lanes) != 1 || got.Lanes[0].Name != laneUpgradeAlpha {
+		t.Fatalf("expected only upgrade lane to remain, got %#v", got.Lanes)
+	}
+	if len(got.SkippedLanes) != 1 || got.SkippedLanes[0].Name != laneFreshAlpha {
+		t.Fatalf("expected fresh lane skip, got %#v", got.SkippedLanes)
 	}
 }
 

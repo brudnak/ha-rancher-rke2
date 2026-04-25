@@ -36,7 +36,7 @@ func getTerraformOptions(t *testing.T, totalHAs int) *terraform.Options {
 		t.Fatalf("Failed to sync Terraform backend file: %v", err)
 	}
 
-	return terraform.WithDefaultRetryableErrors(t, &terraform.Options{
+	options := terraform.WithDefaultRetryableErrors(t, &terraform.Options{
 		TerraformDir:  "../modules/aws",
 		NoColor:       true,
 		Lock:          true,
@@ -56,6 +56,14 @@ func getTerraformOptions(t *testing.T, totalHAs int) *terraform.Options {
 			"aws_route53_fqdn":      viper.GetString("tf_vars.aws_route53_fqdn"),
 		},
 	})
+
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		log.Printf("Logging disabled. Terraform logs will be suppressed.")
+		logger.Default = logger.Discard
+		options.Logger = logger.Discard
+	}
+
+	return options
 }
 
 func terraformBackendConfigFromEnv() (map[string]interface{}, error) {
@@ -131,17 +139,7 @@ func getTerraformOutputs(t *testing.T, terraformOptions *terraform.Options) map[
 }
 
 func getTerraformOutputsE(t *testing.T, terraformOptions *terraform.Options) (map[string]string, error) {
-	outputOptions := terraformOptions
-	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		clonedOptions, err := terraformOptions.Clone()
-		if err != nil {
-			return nil, err
-		}
-		clonedOptions.Logger = logger.Discard
-		outputOptions = clonedOptions
-	}
-
-	output, err := terraform.OutputJsonE(t, outputOptions, "flat_outputs")
+	output, err := terraform.OutputJsonE(t, terraformOptions, "flat_outputs")
 	if err != nil {
 		return nil, err
 	}
