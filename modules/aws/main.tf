@@ -84,30 +84,30 @@ module "ha" {
   for_each = local.ha_instances
   source   = "./modules/rke2-ha"
 
-  aws_prefix           = each.value
-  aws_vpc              = var.aws_vpc
-  aws_subnet_a         = var.aws_subnet_a
-  aws_subnet_b         = var.aws_subnet_b
-  aws_subnet_c         = var.aws_subnet_c
-  aws_ami              = var.aws_ami
-  aws_subnet_id        = var.aws_subnet_id
+  aws_prefix            = each.value
+  aws_vpc               = var.aws_vpc
+  aws_subnet_a          = var.aws_subnet_a
+  aws_subnet_b          = var.aws_subnet_b
+  aws_subnet_c          = var.aws_subnet_c
+  aws_ami               = var.aws_ami
+  aws_subnet_id         = var.aws_subnet_id
   aws_security_group_id = var.aws_security_group_id
-  aws_pem_key_name     = var.aws_pem_key_name
-  aws_route53_fqdn     = var.aws_route53_fqdn
+  aws_pem_key_name      = var.aws_pem_key_name
+  aws_route53_fqdn      = var.aws_route53_fqdn
 }
 
 # Outputs
 output "ha_details" {
   value = {
     for idx, instance in module.ha : "ha_${idx}" => {
-      server1_ip = instance.server1_ip
-      server2_ip = instance.server2_ip
-      server3_ip = instance.server3_ip
+      server1_ip         = instance.server1_ip
+      server2_ip         = instance.server2_ip
+      server3_ip         = instance.server3_ip
       server1_private_ip = instance.server1_private_ip
       server2_private_ip = instance.server2_private_ip
       server3_private_ip = instance.server3_private_ip
-      aws_lb = instance.aws_lb
-      rancher_url = instance.rancher_url
+      aws_lb             = instance.aws_lb
+      rancher_url        = instance.rancher_url
     }
   }
 }

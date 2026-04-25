@@ -68,8 +68,9 @@ resource "random_id" "unique" {
 }
 
 locals {
-  name_prefix = "${var.aws_prefix}-${random_pet.name.id}-${random_id.unique.hex}"
-  domain_name = "${local.name_prefix}.${var.aws_route53_fqdn}"
+  name_prefix         = "${var.aws_prefix}-${random_pet.name.id}-${random_id.unique.hex}"
+  target_group_prefix = substr(local.name_prefix, 0, 28)
+  domain_name         = "${local.name_prefix}.${var.aws_route53_fqdn}"
 }
 
 resource "aws_instance" "aws_instance" {
@@ -81,23 +82,23 @@ resource "aws_instance" "aws_instance" {
   key_name               = var.aws_pem_key_name
   iam_instance_profile   = aws_iam_instance_profile.ssm_profile.name
 
-    root_block_device {
-      volume_size = 200
-      tags = {
-        Name = "${local.name_prefix}-${count.index + 1}"
-        Owner = "${var.aws_prefix}-terraform"
-      }
-    }
-
+  root_block_device {
+    volume_size = 200
     tags = {
-      Name = "${local.name_prefix}-${count.index + 1}"
+      Name  = "${local.name_prefix}-${count.index + 1}"
       Owner = "${var.aws_prefix}-terraform"
     }
+  }
+
+  tags = {
+    Name  = "${local.name_prefix}-${count.index + 1}"
+    Owner = "${var.aws_prefix}-terraform"
+  }
 }
 
 # Application Load Balancer for Rancher UI (80/443)
 resource "aws_lb_target_group" "aws_lb_target_group_80" {
-  name        = "${local.name_prefix}-80"
+  name        = "${local.target_group_prefix}-80"
   port        = 80
   protocol    = "HTTP"
   target_type = "instance"
@@ -111,7 +112,7 @@ resource "aws_lb_target_group" "aws_lb_target_group_80" {
 }
 
 resource "aws_lb_target_group" "aws_lb_target_group_443" {
-  name        = "${local.name_prefix}-443"
+  name        = "${local.target_group_prefix}-443"
   port        = 443
   protocol    = "HTTPS"
   target_type = "instance"
