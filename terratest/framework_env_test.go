@@ -63,7 +63,7 @@ func writeLocalSuiteEnv(instanceNum int, haOutputs TerraformOutputs) error {
 }
 
 func writeSuiteEnvOutput(instanceNum int, clusterName string, haOutputs TerraformOutputs, adminToken, name string) error {
-	outputDir := "automation-output"
+	outputDir := automationOutputDir()
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return err
 	}

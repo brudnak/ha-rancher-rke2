@@ -127,7 +127,7 @@ func TestHAOverrideDownstreamWebhook(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(records) == 0 {
-		t.Skip("no automation-output/downstream-ha-*.json files found; skipping downstream webhook override")
+		t.Skip("no downstream-ha-*.json files found; skipping downstream webhook override")
 	}
 
 	var wg sync.WaitGroup
@@ -293,7 +293,7 @@ func selectWebhookDeployment(data []byte, fallbackNamespace string) (webhookDepl
 }
 
 func writeWebhookOverrideRecord(scope string, instanceNum int, clusterName string, target webhookDeploymentTarget, webhookImage string) error {
-	if err := os.MkdirAll("automation-output", 0o755); err != nil {
+	if err := os.MkdirAll(automationOutputDir(), 0o755); err != nil {
 		return err
 	}
 	payload := map[string]interface{}{
@@ -311,7 +311,7 @@ func writeWebhookOverrideRecord(scope string, instanceNum int, clusterName strin
 	if err != nil {
 		return err
 	}
-	path := filepath.Join("automation-output", fmt.Sprintf("webhook-override-%s-ha-%d.json", scope, instanceNum))
+	path := automationOutputPath(fmt.Sprintf("webhook-override-%s-ha-%d.json", scope, instanceNum))
 	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 

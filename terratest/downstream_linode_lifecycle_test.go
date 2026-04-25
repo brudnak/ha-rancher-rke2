@@ -235,7 +235,7 @@ func TestHADeleteLinodeDownstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(records) == 0 {
-		t.Skip("no automation-output/downstream-ha-*.json files found; skipping Linode downstream cleanup")
+		t.Skip("no downstream-ha-*.json files found; skipping Linode downstream cleanup")
 	}
 
 	timeout := durationFromEnv("LINODE_DOWNSTREAM_DELETE_TIMEOUT", 20*time.Minute)
@@ -280,7 +280,7 @@ type downstreamOutputRecord struct {
 }
 
 func readDownstreamOutputRecords() ([]downstreamOutputRecord, error) {
-	paths, err := filepath.Glob(filepath.Join("automation-output", "downstream-ha-*.json"))
+	paths, err := filepath.Glob(automationOutputPath("downstream-ha-*.json"))
 	if err != nil {
 		return nil, err
 	}
@@ -523,7 +523,7 @@ func summarizeProvisioningClusterStatus(status provisioningClusterStatus) string
 }
 
 func writeDownstreamOutputs(instanceNum int, cfg downstreamProvisioningConfig, haOutputs TerraformOutputs, managementClusterID string) error {
-	outputDir := "automation-output"
+	outputDir := automationOutputDir()
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return err
 	}
@@ -565,11 +565,11 @@ func writeDownstreamOutputs(instanceNum int, cfg downstreamProvisioningConfig, h
 }
 
 func downstreamKubeconfigPath(instanceNum int) string {
-	return filepath.Join("automation-output", fmt.Sprintf("downstream-ha-%d.kubeconfig", instanceNum))
+	return automationOutputPath(fmt.Sprintf("downstream-ha-%d.kubeconfig", instanceNum))
 }
 
 func writeDownstreamKubeconfig(instanceNum int, cfg downstreamProvisioningConfig, haOutputs TerraformOutputs, managementClusterID string) (string, error) {
-	if err := os.MkdirAll("automation-output", 0o755); err != nil {
+	if err := os.MkdirAll(automationOutputDir(), 0o755); err != nil {
 		return "", err
 	}
 	kubeconfigPath := downstreamKubeconfigPath(instanceNum)

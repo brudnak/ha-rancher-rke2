@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func cleanupHAInstance(instanceNum int) {
@@ -39,6 +40,17 @@ func cleanupTerraformFiles() {
 	}
 
 	RemoveFolder("../modules/aws/.terraform")
+}
+
+func automationOutputDir() string {
+	if workspace := strings.TrimSpace(os.Getenv("GITHUB_WORKSPACE")); workspace != "" {
+		return filepath.Join(workspace, "automation-output")
+	}
+	return "automation-output"
+}
+
+func automationOutputPath(name string) string {
+	return filepath.Join(automationOutputDir(), name)
 }
 
 func CreateInstallScript(helmCommand, haDir string) {
