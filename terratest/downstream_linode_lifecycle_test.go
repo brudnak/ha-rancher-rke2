@@ -471,7 +471,6 @@ spec:
       workerRole: true
       quantity: 1
       drainBeforeDelete: true
-      hostnamePrefix: ""
       labels: {}
       unhealthyNodeTimeout: "0m"
       machineConfigRef:
