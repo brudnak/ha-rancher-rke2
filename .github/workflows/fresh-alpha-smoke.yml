@@ -43,7 +43,7 @@ on:
       run_rancher_tests:
         description: Clone rancher/tests and run the lane's test suites after the lane is ready.
         required: true
-        default: false
+        default: true
         type: boolean
       rancher_tests_ref:
         description: rancher/tests ref to clone. Defaults to main.
@@ -178,16 +178,16 @@ jobs:
 
       - name: Run lane setup
         id: setup
-        run: go test -v -run TestHaSetup -timeout 90m ./terratest
+        run: go test -v -run '^TestHaSetup$' -timeout 90m ./terratest
 
       - name: Wait for lane readiness
         id: ready
-        run: go test -v -run TestHAWaitReady -timeout 35m ./terratest
+        run: go test -v -run '^TestHAWaitReady$' -timeout 35m ./terratest
 
       - name: Export local suite env
         id: local_suite_env
         if: ${{ inputs.lane == 'fresh-alpha-local-suites' }}
-        run: go test -v -run TestHAWriteLocalSuiteEnv -timeout 5m ./terratest
+        run: go test -v -run '^TestHAWriteLocalSuiteEnv$' -timeout 5m ./terratest
 
       - name: Validate Linode token
         if: ${{ inputs.lane != 'fresh-alpha-local-suites' }}
@@ -196,22 +196,22 @@ jobs:
       - name: Provision downstream Linode K3s
         id: downstream
         if: ${{ inputs.lane != 'fresh-alpha-local-suites' }}
-        run: go test -v -run TestHAProvisionLinodeDownstream -timeout 55m ./terratest
+        run: go test -v -run '^TestHAProvisionLinodeDownstream$' -timeout 55m ./terratest
 
       - name: Override local webhook image
         id: local_webhook
         if: ${{ inputs.lane == 'previous-with-candidate-webhook' }}
-        run: go test -v -run TestHAOverrideLocalWebhook -timeout 30m ./terratest
+        run: go test -v -run '^TestHAOverrideLocalWebhook$' -timeout 30m ./terratest
 
       - name: Override downstream webhook image
         id: downstream_webhook
         if: ${{ inputs.lane == 'previous-with-candidate-webhook' }}
-        run: go test -v -run TestHAOverrideDownstreamWebhook -timeout 20m ./terratest
+        run: go test -v -run '^TestHAOverrideDownstreamWebhook$' -timeout 20m ./terratest
 
       - name: Run Rancher upgrade
         id: upgrade
         if: ${{ inputs.lane == 'upgrade-alpha' }}
-        run: go test -v -run TestHAUpgradeRancher -timeout 45m ./terratest
+        run: go test -v -run '^TestHAUpgradeRancher$' -timeout 45m ./terratest
 
       - name: Run Rancher tests
         id: rancher_tests
@@ -228,7 +228,7 @@ jobs:
             version="${{ inputs.rancher_version }}"
             version="${version#v}"
             IFS='.' read -r rancher_major rancher_minor _ <<< "$version"
-            suites=("frameworks-reg")
+            suites=("frameworks-reg-configmaps")
             if [ "$rancher_major" -eq 2 ] && [ "$rancher_minor" -le 11 ]; then
               suites+=("vai-disabled")
             else
@@ -312,7 +312,7 @@ jobs:
                 tags="validation,infra.any,cluster.any"
                 timeout_args=()
                 ;;
-              frameworks-reg)
+              frameworks-reg-configmaps)
                 package="./validation/configmaps"
                 test_run="TestConfigMapTestSuite"
                 tags="validation,infra.any,cluster.any"
@@ -363,7 +363,7 @@ jobs:
             fi
             append_result "$suite" "$package" "$test_run" "test-results/${suite}.xml" "$conclusion"
 
-            if [ "$suite" = "frameworks-reg" ]; then
+            if [ "$suite" = "frameworks-reg-configmaps" ]; then
               if [ "$suite_settle_seconds" -gt 0 ]; then
                 echo "Settling for ${suite_settle_seconds}s before frameworks-reg schemas"
                 sleep "$suite_settle_seconds"
@@ -387,7 +387,7 @@ jobs:
                 conclusion="failure"
                 failed=1
               fi
-              append_result "$suite" "$package" "$test_run" "test-results/frameworks-reg-schemas.xml" "$conclusion"
+              append_result "frameworks-reg-schemas" "$package" "$test_run" "test-results/frameworks-reg-schemas.xml" "$conclusion"
 
               if [ "$suite_settle_seconds" -gt 0 ]; then
                 echo "Settling for ${suite_settle_seconds}s before frameworks-reg node annotations"
@@ -412,7 +412,7 @@ jobs:
                 conclusion="failure"
                 failed=1
               fi
-              append_result "$suite" "$package" "$test_run" "test-results/frameworks-reg-nodeannotations.xml" "$conclusion"
+              append_result "frameworks-reg-nodeannotations" "$package" "$test_run" "test-results/frameworks-reg-nodeannotations.xml" "$conclusion"
             fi
           done
 
@@ -431,12 +431,12 @@ jobs:
 
       - name: Delete downstream Linode K3s
         if: ${{ always() && inputs.lane != 'fresh-alpha-local-suites' && (inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && steps.downstream.outcome == 'success' && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success'))) }}
-        run: go test -v -run TestHADeleteLinodeDownstream -timeout 25m ./terratest
+        run: go test -v -run '^TestHADeleteLinodeDownstream$' -timeout 25m ./terratest
 
       - name: Run lane cleanup
         id: cleanup
         if: ${{ always() && (inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && (inputs.lane == 'fresh-alpha-local-suites' || steps.downstream.outcome == 'success') && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success'))) }}
-        run: go test -v -run TestHACleanup -timeout 30m ./terratest
+        run: go test -v -run '^TestHACleanup$' -timeout 30m ./terratest
 
       - name: Render sign-off report
         if: always()
