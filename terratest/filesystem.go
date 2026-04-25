@@ -28,6 +28,7 @@ func cleanupHAInstance(instanceNum int) {
 func cleanupTerraformFiles() {
 	files := []string{
 		"../modules/aws/.terraform.lock.hcl",
+		"../modules/aws/backend.tf",
 		"../modules/aws/terraform.tfstate",
 		"../modules/aws/terraform.tfstate.backup",
 		"../modules/aws/terraform.tfvars",

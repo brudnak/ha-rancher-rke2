@@ -31,10 +31,15 @@ func getTerraformOptions(t *testing.T, totalHAs int) *terraform.Options {
 	if err != nil {
 		t.Fatalf("Invalid Terraform backend environment: %v", err)
 	}
+	if err := syncTerraformBackendFile(backendConfig); err != nil {
+		t.Fatalf("Failed to sync Terraform backend file: %v", err)
+	}
 
 	return terraform.WithDefaultRetryableErrors(t, &terraform.Options{
 		TerraformDir:  "../modules/aws",
 		NoColor:       true,
+		Lock:          true,
+		LockTimeout:   "5m",
 		BackendConfig: backendConfig,
 		Vars: map[string]interface{}{
 			"total_has":             totalHAs,
@@ -86,6 +91,21 @@ func terraformBackendConfigFromEnv() (map[string]interface{}, error) {
 	}, nil
 }
 
+func syncTerraformBackendFile(backendConfig map[string]interface{}) error {
+	path := "../modules/aws/backend.tf"
+	if backendConfig == nil {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+
+	return os.WriteFile(path, []byte(`terraform {
+  backend "s3" {}
+}
+`), 0644)
+}
+
 func generateAwsVars() {
 	hcl.GenAwsVar(
 		viper.GetString("tf_vars.aws_prefix"),
@@ -102,19 +122,25 @@ func generateAwsVars() {
 }
 
 func getTerraformOutputs(t *testing.T, terraformOptions *terraform.Options) map[string]string {
-	output := terraform.OutputJson(t, terraformOptions, "flat_outputs")
+	outputs, err := getTerraformOutputsE(t, terraformOptions)
+	if err != nil {
+		t.Fatalf("Failed to get terraform outputs: %v", err)
+	}
+	return outputs
+}
 
+func getTerraformOutputsE(t *testing.T, terraformOptions *terraform.Options) (map[string]string, error) {
+	output, err := terraform.OutputJsonE(t, terraformOptions, "flat_outputs")
+	if err != nil {
+		return nil, err
+	}
 	var outputs map[string]string
 	if err := json.Unmarshal([]byte(output), &outputs); err != nil {
-		if t != nil {
-			t.Logf("Raw output: %s", output)
-			t.Fatalf("Failed to parse terraform outputs: %v", err)
-		}
 		log.Printf("Raw output: %s", output)
-		return nil
+		return nil, fmt.Errorf("failed to parse terraform outputs: %w", err)
 	}
 
-	return outputs
+	return outputs, nil
 }
 
 func getHAOutputs(instanceNum int, outputs map[string]string) TerraformOutputs {

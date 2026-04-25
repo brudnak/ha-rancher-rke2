@@ -26,6 +26,7 @@ go.work.sum
 
 # Terraform specific ignores
 **/.terraform/*
+modules/aws/backend.tf
 *.tfstate
 *.tfstate.*
 *.tfvars

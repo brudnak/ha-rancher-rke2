@@ -105,10 +105,16 @@ func TestHACleanup(t *testing.T) {
 	}
 
 	terraformOptions := getTerraformOptions(t, totalHAs)
-	outputs := getTerraformOutputs(t, terraformOptions)
-	costEstimate, estimateErr := estimateCurrentRunCost(totalHAs, outputs)
-	if estimateErr != nil {
-		log.Printf("[cleanup] Could not estimate EC2/EBS cost before destroy: %v", estimateErr)
+	var costEstimate *cleanupCostEstimate
+	outputs, outputsErr := getTerraformOutputsE(t, terraformOptions)
+	if outputsErr != nil {
+		log.Printf("[cleanup] Terraform outputs unavailable before destroy, likely no infrastructure was applied yet: %v", outputsErr)
+	} else {
+		var estimateErr error
+		costEstimate, estimateErr = estimateCurrentRunCost(totalHAs, outputs)
+		if estimateErr != nil {
+			log.Printf("[cleanup] Could not estimate EC2/EBS cost before destroy: %v", estimateErr)
+		}
 	}
 	terraform.Destroy(t, terraformOptions)
 
