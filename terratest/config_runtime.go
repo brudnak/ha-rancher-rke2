@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/brudnak/ha-rancher-rke2/terratest/hcl"
+	"github.com/gruntwork-io/terratest/modules/logger"
 	"github.com/gruntwork-io/terratest/modules/terraform"
 	"github.com/spf13/viper"
 )
@@ -130,7 +131,17 @@ func getTerraformOutputs(t *testing.T, terraformOptions *terraform.Options) map[
 }
 
 func getTerraformOutputsE(t *testing.T, terraformOptions *terraform.Options) (map[string]string, error) {
-	output, err := terraform.OutputJsonE(t, terraformOptions, "flat_outputs")
+	outputOptions := terraformOptions
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		clonedOptions, err := terraformOptions.Clone()
+		if err != nil {
+			return nil, err
+		}
+		clonedOptions.Logger = logger.Discard
+		outputOptions = clonedOptions
+	}
+
+	output, err := terraform.OutputJsonE(t, outputOptions, "flat_outputs")
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +151,16 @@ func getTerraformOutputsE(t *testing.T, terraformOptions *terraform.Options) (ma
 		return nil, fmt.Errorf("failed to parse terraform outputs: %w", err)
 	}
 
+	maskTerraformOutputs(outputs)
 	return outputs, nil
+}
+
+func maskTerraformOutputs(outputs map[string]string) {
+	for key, value := range outputs {
+		if strings.HasSuffix(key, "_rancher_url") {
+			maskGitHubActionsURL(value)
+		}
+	}
 }
 
 func getHAOutputs(instanceNum int, outputs map[string]string) TerraformOutputs {

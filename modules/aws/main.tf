@@ -110,6 +110,7 @@ output "ha_details" {
       rancher_url        = instance.rancher_url
     }
   }
+  sensitive = true
 }
 
 output "flat_outputs" {
@@ -125,4 +126,5 @@ output "flat_outputs" {
       "ha_${idx}_rancher_url"        = instance.rancher_url
     }
   ]...)
+  sensitive = true
 }

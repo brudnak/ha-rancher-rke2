@@ -44,6 +44,7 @@ func createRancherAdminToken(rancherURL, bootstrapPassword string) (string, erro
 
 	tokenPayload := map[string]interface{}{
 		"type":        "token",
+		"metadata":    struct{}{},
 		"description": "ha-rancher-rke2 automation",
 		"ttl":         7776000000,
 	}
@@ -58,6 +59,26 @@ func createRancherAdminToken(rancherURL, bootstrapPassword string) (string, erro
 	}
 	maskGitHubActionsValue(tokenResp.Token)
 	return tokenResp.Token, nil
+}
+
+func configureRancherServerURL(rancherURL, bearerToken string) error {
+	rancherURL = strings.TrimRight(clickableURL(rancherURL), "/")
+	if strings.TrimSpace(bearerToken) == "" {
+		return fmt.Errorf("bearer token must not be empty")
+	}
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	payload := map[string]string{
+		"name":  "server-url",
+		"value": rancherURL,
+	}
+	return putRancherJSON(client, rancherURL+"/v3/settings/server-url", bearerToken, payload)
 }
 
 func generateRancherKubeconfig(rancherURL, bearerToken, clusterID string) (string, error) {
@@ -120,6 +141,37 @@ func postRancherJSON(client *http.Client, url, bearerToken string, payload inter
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("failed to parse Rancher API response from %s: %w", url, err)
+	}
+	return nil
+}
+
+func putRancherJSON(client *http.Client, url, bearerToken string, payload interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("Rancher API PUT %s returned HTTP %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
 }

@@ -58,6 +58,9 @@ func writeLocalSuiteEnv(instanceNum int, haOutputs TerraformOutputs) error {
 	if err != nil {
 		return err
 	}
+	if err := configureRancherServerURL(haOutputs.RancherURL, adminToken); err != nil {
+		return err
+	}
 
 	return writeSuiteEnvOutput(instanceNum, "local", haOutputs, adminToken, "local-suite")
 }
@@ -70,7 +73,7 @@ func writeSuiteEnvOutput(instanceNum int, clusterName string, haOutputs Terrafor
 
 	envPath := filepath.Join(outputDir, fmt.Sprintf("%s-ha-%d.env", name, instanceNum))
 	envContent := fmt.Sprintf("RANCHER_HOST=%s\nRANCHER_ADMIN_TOKEN=%s\nCLUSTER_NAME=%s\n",
-		clickableURL(haOutputs.RancherURL), adminToken, clusterName)
+		rancherTestsHost(haOutputs.RancherURL), adminToken, clusterName)
 	if err := os.WriteFile(envPath, []byte(envContent), 0o600); err != nil {
 		return err
 	}

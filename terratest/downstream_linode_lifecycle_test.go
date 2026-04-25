@@ -533,7 +533,10 @@ func writeDownstreamOutputs(instanceNum int, cfg downstreamProvisioningConfig, h
 	if err != nil {
 		return err
 	}
-	envContent := fmt.Sprintf("RANCHER_HOST=%s\nRANCHER_ADMIN_TOKEN=%s\nCLUSTER_NAME=%s\n", clickableURL(haOutputs.RancherURL), adminToken, cfg.ClusterName)
+	if err := configureRancherServerURL(haOutputs.RancherURL, adminToken); err != nil {
+		return err
+	}
+	envContent := fmt.Sprintf("RANCHER_HOST=%s\nRANCHER_ADMIN_TOKEN=%s\nCLUSTER_NAME=%s\n", rancherTestsHost(haOutputs.RancherURL), adminToken, cfg.ClusterName)
 	if err := os.WriteFile(envPath, []byte(envContent), 0o600); err != nil {
 		return err
 	}

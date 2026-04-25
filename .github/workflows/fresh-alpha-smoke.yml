@@ -253,6 +253,24 @@ jobs:
           set +a
           echo "::add-mask::$RANCHER_ADMIN_TOKEN"
 
+          rancher_host="${RANCHER_HOST#https://}"
+          rancher_host="${rancher_host#http://}"
+          rancher_host="${rancher_host%/}"
+          export RANCHER_HOST="$rancher_host"
+          echo "::add-mask::$RANCHER_HOST"
+          echo "::add-mask::https://${RANCHER_HOST}"
+
+          curl --fail --silent --show-error --insecure \
+            -X PUT "https://${RANCHER_HOST}/v3/settings/server-url" \
+            -H "Authorization: Bearer ${RANCHER_ADMIN_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary "{\"name\":\"server-url\",\"value\":\"https://${RANCHER_HOST}\"}"
+
+          curl --fail --silent --show-error --insecure \
+            -H "Authorization: Bearer ${RANCHER_ADMIN_TOKEN}" \
+            "https://${RANCHER_HOST}/v3" >/dev/null
+          echo "Verified Rancher API access for rancher/tests"
+
           mkdir -p automation-output
           mkdir -p test-results
 
@@ -399,6 +417,13 @@ jobs:
           if [ "$failed" -ne 0 ]; then
             exit 1
           fi
+
+      - name: Refresh AWS credentials before cleanup
+        if: ${{ always() }}
+        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_AUTOMATION_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Delete downstream Linode K3s
         if: ${{ always() && inputs.lane != 'fresh-alpha-local-suites' && (inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && steps.downstream.outcome == 'success' && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success'))) }}
