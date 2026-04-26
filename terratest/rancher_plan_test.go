@@ -168,6 +168,8 @@ func TestValidateResolvedRancherImagesChecksExplicitRancherAndAgentImages(t *tes
 }
 
 func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T) {
+	t.Setenv("RANCHER_WEBHOOK_IMAGE", "registry.suse.com/rancher/rancher-webhook:v0.9.3")
+
 	commands := buildAutoHelmCommands(
 		1,
 		rancherHelmOperationInstall,
@@ -183,10 +185,11 @@ func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T)
 	expectedSnippets := []string{
 		"--set tls=external",
 		"--set systemDefaultRegistry=stgregistry.suse.com",
-		"--set rancherImage=rancher/rancher",
+		"--set rancherImage=stgregistry.suse.com/rancher/rancher",
 		"--set rancherImageTag=v2.14.1-alpha3",
 		"--set 'extraEnv[0].name=CATTLE_AGENT_IMAGE'",
 		"--set 'extraEnv[0].value=rancher/rancher-agent:v2.14.1-alpha3'",
+		"--set webhook.global.cattle.systemDefaultRegistry=registry.suse.com",
 	}
 
 	for _, snippet := range expectedSnippets {
@@ -228,6 +231,8 @@ func TestBuildAutoHelmCommandsCanUseCommunityAlphaImageFallback(t *testing.T) {
 }
 
 func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
+	t.Setenv("RANCHER_WEBHOOK_IMAGE", "registry.suse.com/rancher/rancher-webhook:v0.9.3")
+
 	command := buildAutoHelmCommand(
 		rancherHelmOperationUpgrade,
 		"optimus-rancher-alpha",
@@ -245,10 +250,11 @@ func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
 		"--set hostname=placeholder",
 		"--set tls=external",
 		"--set systemDefaultRegistry=stgregistry.suse.com",
-		"--set rancherImage=rancher/rancher",
+		"--set rancherImage=stgregistry.suse.com/rancher/rancher",
 		"--set rancherImageTag=v2.14.1-alpha6",
 		"--set 'extraEnv[0].name=CATTLE_AGENT_IMAGE'",
 		"--set 'extraEnv[0].value=rancher/rancher-agent:v2.14.1-alpha6'",
+		"--set webhook.global.cattle.systemDefaultRegistry=registry.suse.com",
 		"--wait",
 		"--wait-for-jobs",
 		"--timeout 30m",
@@ -264,37 +270,42 @@ func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
 	}
 }
 
-func TestNormalizeHelmImageSettingsUsesSystemDefaultRegistry(t *testing.T) {
+func TestNormalizeHelmImageSettingsUsesStagingDefaultRegistryForQualifiedAgent(t *testing.T) {
+	t.Setenv("RANCHER_WEBHOOK_IMAGE", "registry.suse.com/rancher/rancher-webhook:v0.9.3")
+
 	settings := normalizeHelmImageSettings(
 		"stgregistry.suse.com/rancher/rancher",
 		"stgregistry.suse.com/rancher/rancher-agent:v2.13.5-alpha6",
 	)
 
 	if settings.systemDefaultRegistry != "stgregistry.suse.com" {
-		t.Fatalf("expected staging registry as system default, got %q", settings.systemDefaultRegistry)
+		t.Fatalf("expected staging system default registry, got %q", settings.systemDefaultRegistry)
 	}
-	if settings.rancherImage != "rancher/rancher" {
-		t.Fatalf("expected relative Rancher image, got %q", settings.rancherImage)
+	if settings.rancherImage != "stgregistry.suse.com/rancher/rancher" {
+		t.Fatalf("expected qualified Rancher image, got %q", settings.rancherImage)
 	}
 	if settings.agentImage != "rancher/rancher-agent:v2.13.5-alpha6" {
 		t.Fatalf("expected relative agent image, got %q", settings.agentImage)
 	}
+	if settings.webhookRegistry != "registry.suse.com" {
+		t.Fatalf("expected webhook registry override, got %q", settings.webhookRegistry)
+	}
 }
 
-func TestNormalizeHelmImageSettingsKeepsMixedRegistriesQualified(t *testing.T) {
+func TestNormalizeHelmImageSettingsLeavesDefaultRegistryForChartDefaultAgent(t *testing.T) {
 	settings := normalizeHelmImageSettings(
-		"stgregistry.suse.com/rancher/rancher",
-		"registry.example.com/rancher/rancher-agent:v2.13.5-alpha6",
+		"registry.rancher.com/rancher/rancher",
+		"",
 	)
 
 	if settings.systemDefaultRegistry != "" {
-		t.Fatalf("expected no system default for mixed registries, got %q", settings.systemDefaultRegistry)
+		t.Fatalf("expected no system default registry override, got %q", settings.systemDefaultRegistry)
 	}
-	if settings.rancherImage != "stgregistry.suse.com/rancher/rancher" {
+	if settings.rancherImage != "registry.rancher.com/rancher/rancher" {
 		t.Fatalf("expected qualified Rancher image to be preserved, got %q", settings.rancherImage)
 	}
-	if settings.agentImage != "registry.example.com/rancher/rancher-agent:v2.13.5-alpha6" {
-		t.Fatalf("expected qualified agent image to be preserved, got %q", settings.agentImage)
+	if settings.agentImage != "" {
+		t.Fatalf("expected empty agent image to be preserved, got %q", settings.agentImage)
 	}
 }
 

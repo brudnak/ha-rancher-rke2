@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -966,6 +967,11 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 			"  --set 'extraEnv[0].value=" + helmImages.agentImage + "' \\",
 		}, baseSettings[len(baseSettings)-1:]...)...)
 	}
+	if helmImages.webhookRegistry != "" {
+		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
+			"  --set webhook.global.cattle.systemDefaultRegistry=" + helmImages.webhookRegistry + " \\",
+		}, baseSettings[len(baseSettings)-1:]...)...)
+	}
 
 	if operation == rancherHelmOperationUpgrade {
 		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
@@ -982,6 +988,7 @@ type helmImageSettings struct {
 	systemDefaultRegistry string
 	rancherImage          string
 	agentImage            string
+	webhookRegistry       string
 }
 
 func normalizeHelmImageSettings(rancherImage, agentImage string) helmImageSettings {
@@ -990,19 +997,12 @@ func normalizeHelmImageSettings(rancherImage, agentImage string) helmImageSettin
 		agentImage:   strings.TrimSpace(agentImage),
 	}
 
-	rancherRegistry, rancherRepository, ok := splitRegistryRepository(settings.rancherImage)
-	if !ok {
-		return settings
-	}
-	agentRegistry, agentRepositoryTag, ok := splitRegistryRepository(settings.agentImage)
-	if settings.agentImage != "" && (!ok || agentRegistry != rancherRegistry) {
-		return settings
-	}
-
-	settings.systemDefaultRegistry = rancherRegistry
-	settings.rancherImage = rancherRepository
-	if settings.agentImage != "" {
+	rancherRegistry, _, rancherOK := splitRegistryRepository(settings.rancherImage)
+	agentRegistry, agentRepositoryTag, agentOK := splitRegistryRepository(settings.agentImage)
+	if rancherOK && agentOK && rancherRegistry == agentRegistry {
+		settings.systemDefaultRegistry = agentRegistry
 		settings.agentImage = agentRepositoryTag
+		settings.webhookRegistry = webhookSystemDefaultRegistryOverride(agentRegistry)
 	}
 	return settings
 }
@@ -1017,6 +1017,18 @@ func splitRegistryRepository(image string) (string, string, bool) {
 		return "", "", false
 	}
 	return registry, repository, true
+}
+
+func webhookSystemDefaultRegistryOverride(systemDefaultRegistry string) string {
+	webhookImage := strings.TrimSpace(os.Getenv("RANCHER_WEBHOOK_IMAGE"))
+	if webhookImage == "" {
+		return ""
+	}
+	registry, _, _, err := parseRegistryImage(webhookImage)
+	if err != nil || registry == "" || registry == systemDefaultRegistry {
+		return ""
+	}
+	return registry
 }
 
 func fetchURLBody(url string) (string, error) {
