@@ -33,7 +33,7 @@ on:
         type: boolean
   schedule:
     # everything is 19
-    - cron: "19 3,11,19 * * *"
+    - cron: "19 * * * *"
 
 permissions:
   actions: write
