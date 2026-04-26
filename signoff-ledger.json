@@ -1,29 +1,4 @@
 {
   "schema_version": 2,
-  "entries": {
-    "v2.14.1-alpha7": {
-      "fresh-alpha": {
-        "status": "success",
-        "coverage_policy": "alpha-webhook-signoff-v2",
-        "run_id": "24945913059",
-        "run_url": "https://github.com/brudnak/ha-rancher-rke2/actions/runs/24945913059",
-        "workflow": "Run Alpha/Webhook Sign-Off",
-        "lane": "fresh-alpha",
-        "release_line": "v2.14",
-        "target_version": "v2.14.1-alpha7",
-        "previous_version": "v2.14.0",
-        "install_rancher": "v2.14.1-alpha7",
-        "webhook_changed": true,
-        "webhook_image": "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5",
-        "previous_webhook_build": "109.0.0+up0.10.0",
-        "previous_webhook_tag": "v0.10.0",
-        "target_webhook_build": "109.0.1+up0.10.1-rc.5",
-        "target_webhook_tag": "v0.10.1-rc.5",
-        "signing_policy": "required",
-        "signing_registry": "stgregistry.suse.com",
-        "commit_sha": "fa10830036c4a4d839b0186b111a91f0d938ff64",
-        "completed_at": "2026-04-26T02:35:00Z"
-      }
-    }
-  }
+  "entries": {}
 }

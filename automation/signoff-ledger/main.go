@@ -42,29 +42,43 @@ type ledger struct {
 	Entries       map[string]map[string]entry `json:"entries"`
 }
 
+type signingResult struct {
+	TargetVersion      string   `json:"target_version,omitempty"`
+	WebhookImage       string   `json:"webhook_image,omitempty"`
+	SigningPolicy      string   `json:"signing_policy,omitempty"`
+	Tool               string   `json:"tool,omitempty"`
+	Enforced           bool     `json:"enforced"`
+	SignatureVerified  bool     `json:"signature_verified"`
+	ProvenanceVerified bool     `json:"provenance_verified"`
+	SBOMVerified       bool     `json:"sbom_verified"`
+	ClaimTypes         []string `json:"claim_types,omitempty"`
+	VerifiedAt         string   `json:"verified_at,omitempty"`
+}
+
 type entry struct {
-	Status               string `json:"status"`
-	CoveragePolicy       string `json:"coverage_policy"`
-	RunID                string `json:"run_id"`
-	RunURL               string `json:"run_url,omitempty"`
-	Workflow             string `json:"workflow,omitempty"`
-	Lane                 string `json:"lane"`
-	ReleaseLine          string `json:"release_line"`
-	TargetVersion        string `json:"target_version"`
-	PreviousVersion      string `json:"previous_version,omitempty"`
-	InstallRancher       string `json:"install_rancher"`
-	UpgradeToRancher     string `json:"upgrade_to_rancher,omitempty"`
-	WebhookChanged       bool   `json:"webhook_changed"`
-	WebhookImage         string `json:"webhook_image,omitempty"`
-	WebhookOverride      string `json:"webhook_override_image,omitempty"`
-	PreviousWebhookBuild string `json:"previous_webhook_build,omitempty"`
-	PreviousWebhookTag   string `json:"previous_webhook_tag,omitempty"`
-	TargetWebhookBuild   string `json:"target_webhook_build,omitempty"`
-	TargetWebhookTag     string `json:"target_webhook_tag,omitempty"`
-	SigningPolicy        string `json:"signing_policy,omitempty"`
-	SigningRegistry      string `json:"signing_registry,omitempty"`
-	CommitSHA            string `json:"commit_sha,omitempty"`
-	CompletedAt          string `json:"completed_at"`
+	Status               string         `json:"status"`
+	CoveragePolicy       string         `json:"coverage_policy"`
+	RunID                string         `json:"run_id"`
+	RunURL               string         `json:"run_url,omitempty"`
+	Workflow             string         `json:"workflow,omitempty"`
+	Lane                 string         `json:"lane"`
+	ReleaseLine          string         `json:"release_line"`
+	TargetVersion        string         `json:"target_version"`
+	PreviousVersion      string         `json:"previous_version,omitempty"`
+	InstallRancher       string         `json:"install_rancher"`
+	UpgradeToRancher     string         `json:"upgrade_to_rancher,omitempty"`
+	WebhookChanged       bool           `json:"webhook_changed"`
+	WebhookImage         string         `json:"webhook_image,omitempty"`
+	WebhookOverride      string         `json:"webhook_override_image,omitempty"`
+	PreviousWebhookBuild string         `json:"previous_webhook_build,omitempty"`
+	PreviousWebhookTag   string         `json:"previous_webhook_tag,omitempty"`
+	TargetWebhookBuild   string         `json:"target_webhook_build,omitempty"`
+	TargetWebhookTag     string         `json:"target_webhook_tag,omitempty"`
+	SigningPolicy        string         `json:"signing_policy,omitempty"`
+	SigningRegistry      string         `json:"signing_registry,omitempty"`
+	SigningVerification  *signingResult `json:"signing_verification,omitempty"`
+	CommitSHA            string         `json:"commit_sha,omitempty"`
+	CompletedAt          string         `json:"completed_at"`
 }
 
 func main() {
@@ -77,6 +91,7 @@ func main() {
 	var workflow string
 	var commitSHA string
 	var completedAt string
+	var signingResultPath string
 
 	flag.StringVar(&planPath, "plan", "signoff-plan.json", "sign-off plan JSON path")
 	flag.StringVar(&ledgerPath, "ledger", "signoff-ledger.json", "sign-off ledger JSON path")
@@ -87,6 +102,7 @@ func main() {
 	flag.StringVar(&workflow, "workflow", os.Getenv("GITHUB_WORKFLOW"), "GitHub Actions workflow name")
 	flag.StringVar(&commitSHA, "commit-sha", os.Getenv("GITHUB_SHA"), "commit SHA tested by the run")
 	flag.StringVar(&completedAt, "completed-at", "", "completion time in RFC3339; defaults to now")
+	flag.StringVar(&signingResultPath, "signing-result", "", "optional webhook signing verification result JSON path")
 	flag.Parse()
 
 	if strings.TrimSpace(laneName) == "" {
@@ -110,6 +126,10 @@ func main() {
 	l, err := readLedger(ledgerPath)
 	if err != nil {
 		fatalf("read ledger: %v", err)
+	}
+	signingResult, err := readSigningResult(signingResultPath)
+	if err != nil {
+		fatalf("read signing result: %v", err)
 	}
 	l.SchemaVersion = ledgerSchemaVersion
 	if l.Entries == nil {
@@ -139,6 +159,7 @@ func main() {
 		TargetWebhookTag:     plan.TargetWebhookTag,
 		SigningPolicy:        plan.SigningPolicy,
 		SigningRegistry:      plan.SigningRegistry,
+		SigningVerification:  signingResult,
 		CommitSHA:            strings.TrimSpace(commitSHA),
 		CompletedAt:          completedAt,
 	}
@@ -146,6 +167,28 @@ func main() {
 		fatalf("write ledger: %v", err)
 	}
 	fmt.Printf("Recorded %s %s as %s in %s\n", plan.TargetVersion, lane.Name, status, ledgerPath)
+}
+
+func readSigningResult(path string) (*signingResult, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return nil, nil
+	}
+	var result signingResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func readPlan(path string) (signoffPlan, error) {

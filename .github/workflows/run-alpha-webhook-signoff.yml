@@ -142,6 +142,7 @@ jobs:
           go build -o "$RUNNER_TEMP/signoff-ledger" ./automation/signoff-ledger
           go build -o "$RUNNER_TEMP/render-tool-config" ./automation/render-tool-config
           go build -o "$RUNNER_TEMP/render-signoff-report" ./automation/render-signoff-report
+          go build -o "$RUNNER_TEMP/verify-webhook-signing" ./automation/verify-webhook-signing
 
       - name: Generate sign-off plan
         env:
@@ -166,6 +167,57 @@ jobs:
 
           "$RUNNER_TEMP/signoff-plan" "${args[@]}"
           echo "RANCHER_WEBHOOK_CHART_VERSION=$(jq -r '.target_webhook_build' signoff-plan.json)" >> "$GITHUB_ENV"
+
+      - name: Install slsactl
+        run: |
+          set -euo pipefail
+
+          signing_policy="$(jq -r '.signing_policy // "report-only"' signoff-plan.json)"
+          if [ "$signing_policy" != "required" ]; then
+            echo "Signing policy is ${signing_policy}; slsactl is not required"
+            exit 0
+          fi
+
+          version="0.1.31"
+          os_name="linux"
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64) arch="amd64" ;;
+            aarch64|arm64) arch="arm64" ;;
+            *)
+              echo "Unsupported slsactl architecture: $arch"
+              exit 1
+              ;;
+          esac
+
+          asset="slsactl_${version}_${os_name}_${arch}.tar.gz"
+          base_url="https://github.com/rancherlabs/slsactl/releases/download/v${version}"
+          workdir="$RUNNER_TEMP/slsactl"
+          mkdir -p "$workdir"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 20 --max-time 600 \
+            --output "$workdir/$asset" \
+            "$base_url/$asset"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 20 --max-time 120 \
+            --output "$workdir/checksums.txt" \
+            "$base_url/slsactl_${version}_checksums.txt"
+          grep "  ${asset}$" "$workdir/checksums.txt" > "$workdir/${asset}.sha256"
+          (
+            cd "$workdir"
+            sha256sum -c "${asset}.sha256"
+          )
+          mkdir -p "$workdir/bin"
+          tar -xzf "$workdir/$asset" -C "$workdir/bin"
+          sudo install -m 0755 "$workdir/bin/slsactl" /usr/local/bin/slsactl
+          slsactl --help >/dev/null
+
+      - name: Verify webhook image signing
+        run: |
+          "$RUNNER_TEMP/verify-webhook-signing" \
+            -plan signoff-plan.json \
+            -output automation-output/webhook-signing.json \
+            -timeout 5m
 
       - name: Render lane config
         run: |
@@ -491,7 +543,8 @@ jobs:
             -run-id "${{ github.run_id }}" \
             -run-url "$RUN_URL" \
             -workflow "${{ github.workflow }}" \
-            -commit-sha "${{ github.sha }}"
+            -commit-sha "${{ github.sha }}" \
+            -signing-result automation-output/webhook-signing.json
 
           git add signoff-ledger.json
           if git diff --cached --quiet; then
