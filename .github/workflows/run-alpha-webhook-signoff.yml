@@ -173,9 +173,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          signing_policy="$(jq -r '.signing_policy // "report-only"' signoff-plan.json)"
-          if [ "$signing_policy" != "required" ]; then
-            echo "Signing policy is ${signing_policy}; slsactl is not required"
+          signing_policy="$(jq -r '.signing_policy // "skip"' signoff-plan.json)"
+          if [ "$signing_policy" = "skip" ]; then
+            echo "Signing policy is skip; slsactl is not required"
             exit 0
           fi
 
@@ -221,6 +221,7 @@ jobs:
             -timeout 5m
 
       - name: Render lane config
+        id: render_config
         run: |
           "$RUNNER_TEMP/render-tool-config" \
             -plan signoff-plan.json \
@@ -498,12 +499,12 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Delete downstream Linode K3s
-        if: ${{ always() && inputs.lane != 'fresh-alpha-local-suites' && (inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && steps.downstream.outcome == 'success' && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success'))) }}
+        if: ${{ always() && steps.render_config.outcome == 'success' && inputs.lane != 'fresh-alpha-local-suites' && (inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && steps.downstream.outcome == 'success' && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success'))) }}
         run: go test -v -run '^TestHADeleteLinodeDownstream$' -timeout 25m ./terratest
 
       - name: Run lane cleanup
         id: cleanup
-        if: ${{ always() && (inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && (inputs.lane == 'fresh-alpha-local-suites' || steps.downstream.outcome == 'success') && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success'))) }}
+        if: ${{ always() && steps.render_config.outcome == 'success' && (inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && (inputs.lane == 'fresh-alpha-local-suites' || steps.downstream.outcome == 'success') && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success'))) }}
         run: go test -v -run '^TestHACleanup$' -timeout 30m ./terratest
 
       - name: Render sign-off report
@@ -577,7 +578,7 @@ jobs:
             echo "- Downstream webhook override outcome: \`${{ steps.downstream_webhook.outcome }}\`"
             echo "- Upgrade outcome: \`${{ steps.upgrade.outcome }}\`"
             echo "- Rancher tests outcome: \`${{ steps.rancher_tests.outcome }}\`"
-            echo "- Cleanup requested: \`${{ inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && (inputs.lane == 'fresh-alpha-local-suites' || steps.downstream.outcome == 'success') && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success')) }}\`"
+            echo "- Cleanup requested: \`${{ steps.render_config.outcome == 'success' && (inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && (inputs.lane == 'fresh-alpha-local-suites' || steps.downstream.outcome == 'success') && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success'))) }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   wake-planner:

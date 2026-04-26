@@ -51,6 +51,7 @@ type signingResult struct {
 	SignatureVerified  bool     `json:"signature_verified"`
 	ProvenanceVerified bool     `json:"provenance_verified"`
 	SBOMVerified       bool     `json:"sbom_verified"`
+	VerificationError  string   `json:"verification_error,omitempty"`
 	ClaimTypes         []string `json:"claim_types,omitempty"`
 	VerifiedAt         string   `json:"verified_at,omitempty"`
 }

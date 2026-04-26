@@ -39,10 +39,11 @@ func TestResolveSigningPolicy(t *testing.T) {
 		registry string
 		want     string
 	}{
-		{name: "suse auto", input: "auto", registry: "registry.suse.com", want: "required"},
-		{name: "staging auto", input: "auto", registry: "stgregistry.suse.com", want: "required"},
-		{name: "prime auto", input: "auto", registry: "registry.rancher.com", want: "required"},
+		{name: "suse auto", input: "auto", registry: "registry.suse.com", want: "report-only"},
+		{name: "staging auto", input: "auto", registry: "stgregistry.suse.com", want: "report-only"},
+		{name: "prime auto", input: "auto", registry: "registry.rancher.com", want: "report-only"},
 		{name: "community auto", input: "auto", registry: "docker.io", want: "report-only"},
+		{name: "manual required", input: "required", registry: "registry.suse.com", want: "required"},
 		{name: "manual skip", input: "skip", registry: "stgregistry.suse.com", want: "skip"},
 	}
 
@@ -56,6 +57,22 @@ func TestResolveSigningPolicy(t *testing.T) {
 				t.Fatalf("expected %s, got %s", tt.want, got)
 			}
 		})
+	}
+}
+
+func TestWebhookImageCandidatesPreferReleasedSUSERegistryForStableTags(t *testing.T) {
+	candidates := webhookImageCandidates("v0.9.3")
+	want := "registry.suse.com/rancher/rancher-webhook"
+	if len(candidates) == 0 || candidates[0] != want {
+		t.Fatalf("expected first stable candidate %s, got %v", want, candidates)
+	}
+}
+
+func TestWebhookImageCandidatesPreferStagingForPrereleaseTags(t *testing.T) {
+	candidates := webhookImageCandidates("v0.10.1-rc.5")
+	want := "stgregistry.suse.com/rancher/rancher-webhook"
+	if len(candidates) == 0 || candidates[0] != want {
+		t.Fatalf("expected first prerelease candidate %s, got %v", want, candidates)
 	}
 }
 
@@ -74,8 +91,8 @@ func TestBuildPlanAddsOldWebhookLaneWhenWebhookChanged(t *testing.T) {
 	if !plan.WebhookChanged {
 		t.Fatal("expected webhook to be marked changed")
 	}
-	if plan.SigningPolicy != "required" {
-		t.Fatalf("expected required signing policy, got %s", plan.SigningPolicy)
+	if plan.SigningPolicy != "report-only" {
+		t.Fatalf("expected report-only signing policy, got %s", plan.SigningPolicy)
 	}
 	if len(plan.Lanes) != 4 {
 		t.Fatalf("expected 4 lanes, got %d", len(plan.Lanes))
@@ -100,7 +117,7 @@ func TestBuildPlanAddsOldWebhookLaneWhenWebhookChanged(t *testing.T) {
 	}
 }
 
-func TestBuildPlanDiscoversStagingWebhookImageWhenNoOverride(t *testing.T) {
+func TestBuildPlanDiscoversStagingPrereleaseWebhookImageWhenNoOverride(t *testing.T) {
 	client := fakeGitHubClient(t, map[string]string{
 		"/rancher/rancher/v2.14.1-alpha6/build.yaml":                `webhookVersion: 109.0.1+up0.10.1-rc.5`,
 		"/rancher/rancher/v2.14.0/build.yaml":                       `webhookVersion: 109.0.0+up0.10.0`,
@@ -124,11 +141,40 @@ func TestBuildPlanDiscoversStagingWebhookImageWhenNoOverride(t *testing.T) {
 	if plan.WebhookImage != wantImage {
 		t.Fatalf("expected %s, got %s", wantImage, plan.WebhookImage)
 	}
-	if plan.SigningPolicy != "required" {
-		t.Fatalf("expected required signing policy, got %s", plan.SigningPolicy)
+	if plan.SigningPolicy != "report-only" {
+		t.Fatalf("expected report-only signing policy, got %s", plan.SigningPolicy)
 	}
 	if plan.Lanes[3].WebhookOverrideImage != wantImage {
 		t.Fatalf("expected old webhook lane to use %s, got %s", wantImage, plan.Lanes[3].WebhookOverrideImage)
+	}
+}
+
+func TestBuildPlanDiscoversReleasedWebhookImageForStableTagWhenNoOverride(t *testing.T) {
+	client := fakeGitHubClient(t, map[string]string{
+		"/rancher/rancher/v2.13.5-alpha6/build.yaml":          `webhookVersion: 108.0.3+up0.9.3`,
+		"/rancher/rancher/v2.13.4/build.yaml":                 `webhookVersion: 108.0.3+up0.9.3`,
+		"/suse/v2/rancher/rancher-webhook/manifests/v0.9.3":   "ok",
+		"/stg/v2/rancher/rancher-webhook/manifests/v0.9.3":    "ok",
+		"/docker/v2/rancher/rancher-webhook/manifests/v0.9.3": "ok",
+	})
+	client.registryBaseURLs = map[string]string{
+		"stgregistry.suse.com": client.rawBaseURL + "/stg",
+		"registry.rancher.com": client.rawBaseURL + "/prime",
+		"registry.suse.com":    client.rawBaseURL + "/suse",
+		"docker.io":            client.rawBaseURL + "/docker",
+	}
+
+	plan, err := buildPlan(context.Background(), client, "v2.13.5-alpha6", "v2.13.4", "", "auto", "", "ha-rancher-rke2/signoff")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantImage := "registry.suse.com/rancher/rancher-webhook:v0.9.3"
+	if plan.WebhookImage != wantImage {
+		t.Fatalf("expected %s, got %s", wantImage, plan.WebhookImage)
+	}
+	if plan.SigningPolicy != "report-only" {
+		t.Fatalf("expected report-only signing policy, got %s", plan.SigningPolicy)
 	}
 }
 
@@ -177,8 +223,8 @@ func TestBuildPlanFallsBackToPrimeBeforePublicSUSEAndDockerHub(t *testing.T) {
 	if plan.WebhookImage != wantImage {
 		t.Fatalf("expected %s, got %s", wantImage, plan.WebhookImage)
 	}
-	if plan.SigningPolicy != "required" {
-		t.Fatalf("expected required signing policy, got %s", plan.SigningPolicy)
+	if plan.SigningPolicy != "report-only" {
+		t.Fatalf("expected report-only signing policy, got %s", plan.SigningPolicy)
 	}
 }
 

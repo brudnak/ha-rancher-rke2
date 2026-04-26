@@ -45,6 +45,7 @@ type signingResult struct {
 	SignatureVerified  bool     `json:"signature_verified"`
 	ProvenanceVerified bool     `json:"provenance_verified"`
 	SBOMVerified       bool     `json:"sbom_verified"`
+	VerificationError  string   `json:"verification_error,omitempty"`
 	ClaimTypes         []string `json:"claim_types,omitempty"`
 	VerifiedAt         string   `json:"verified_at"`
 }
@@ -112,28 +113,34 @@ func verifyPlan(plan plan, slsactlPath string, timeout time.Duration) (signingRe
 		WebhookImage:  plan.WebhookImage,
 		SigningPolicy: policy,
 		Tool:          "slsactl",
+		Enforced:      false,
 		VerifiedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	if policy == "skip" || policy == "report-only" {
-		fmt.Printf("[signing] %s webhook image signing policy is %s; not enforcing Sigstore/SBOM verification\n", plan.TargetVersion, policy)
+	if policy == "skip" {
+		fmt.Printf("[signing] %s webhook image signing policy is skip; not checking Sigstore/SBOM verification\n", plan.TargetVersion)
 		return result, nil
 	}
-	if policy != "required" {
+	if policy != "required" && policy != "report-only" {
 		return result, fmt.Errorf("%s has unsupported signing policy %q", plan.TargetVersion, plan.SigningPolicy)
 	}
 	if strings.TrimSpace(plan.WebhookImage) == "" {
-		return result, fmt.Errorf("%s has signing_policy=required but no webhook_image", plan.TargetVersion)
+		result.VerificationError = fmt.Sprintf("%s has signing_policy=%s but no webhook_image", plan.TargetVersion, policy)
+		fmt.Printf("[signing] %s\n", result.VerificationError)
+		return result, nil
 	}
-	result.Enforced = true
 
 	fmt.Printf("[signing] Verifying %s webhook image %s with slsactl\n", plan.TargetVersion, plan.WebhookImage)
 	verifyOutput, err := runCommand(timeout, slsactlPath, "verify", plan.WebhookImage)
 	if err != nil {
-		return result, fmt.Errorf("webhook image signature verification failed for %s: %w\n%s", plan.WebhookImage, err, limitOutput(verifyOutput))
+		result.VerificationError = fmt.Sprintf("webhook image signature verification failed for %s: %v\n%s", plan.WebhookImage, err, limitOutput(verifyOutput))
+		fmt.Printf("[signing] %s\n", result.VerificationError)
+		return result, nil
 	}
 	claimTypes, err := validateVerifyOutput(verifyOutput)
 	if err != nil {
-		return result, fmt.Errorf("webhook image signature verification output did not include expected claims for %s: %w\n%s", plan.WebhookImage, err, limitOutput(verifyOutput))
+		result.VerificationError = fmt.Sprintf("webhook image signature verification output did not include expected claims for %s: %v\n%s", plan.WebhookImage, err, limitOutput(verifyOutput))
+		fmt.Printf("[signing] %s\n", result.VerificationError)
+		return result, nil
 	}
 	result.ClaimTypes = claimTypes
 	result.SignatureVerified = containsString(claimTypes, cosignSignType)
@@ -142,10 +149,14 @@ func verifyPlan(plan plan, slsactlPath string, timeout time.Duration) (signingRe
 
 	sbomOutput, err := runCommand(timeout, slsactlPath, "download", "sbom", plan.WebhookImage)
 	if err != nil {
-		return result, fmt.Errorf("webhook image SBOM download failed for %s: %w\n%s", plan.WebhookImage, err, limitOutput(sbomOutput))
+		result.VerificationError = fmt.Sprintf("webhook image SBOM download failed for %s: %v\n%s", plan.WebhookImage, err, limitOutput(sbomOutput))
+		fmt.Printf("[signing] %s\n", result.VerificationError)
+		return result, nil
 	}
 	if err := validateSBOMOutput(sbomOutput); err != nil {
-		return result, fmt.Errorf("webhook image SBOM output was not recognized for %s: %w\n%s", plan.WebhookImage, err, limitOutput(sbomOutput))
+		result.VerificationError = fmt.Sprintf("webhook image SBOM output was not recognized for %s: %v\n%s", plan.WebhookImage, err, limitOutput(sbomOutput))
+		fmt.Printf("[signing] %s\n", result.VerificationError)
+		return result, nil
 	}
 	result.SBOMVerified = true
 	fmt.Printf("[signing] Verified SBOM is available for %s\n", plan.WebhookImage)

@@ -32,13 +32,6 @@ var (
 	webhookBuildRE   = regexp.MustCompile(`(?m)^\s*webhookVersion:\s*["']?([^"'\s]+)["']?\s*$`)
 )
 
-var defaultWebhookImageCandidates = []string{
-	"stgregistry.suse.com/" + defaultWebhook,
-	"registry.rancher.com/" + defaultWebhook,
-	"registry.suse.com/" + defaultWebhook,
-	"docker.io/" + defaultWebhook,
-}
-
 type plan struct {
 	TargetVersion        string        `json:"target_version"`
 	ReleaseLine          string        `json:"release_line"`
@@ -807,7 +800,7 @@ func (c githubClient) webhookBuild(ctx context.Context, tag string) (string, err
 
 func (c githubClient) resolveWebhookImage(ctx context.Context, tag string) (string, error) {
 	var failures []string
-	for _, repository := range defaultWebhookImageCandidates {
+	for _, repository := range webhookImageCandidates(tag) {
 		image := repository + ":" + tag
 		registry, repo, _, err := parseImage(image)
 		if err != nil {
@@ -826,6 +819,29 @@ func (c githubClient) resolveWebhookImage(ctx context.Context, tag string) (stri
 	}
 
 	return "", fmt.Errorf("webhook image tag %s was not found in candidate registries: %s", tag, strings.Join(failures, "; "))
+}
+
+func webhookImageCandidates(tag string) []string {
+	if isPrereleaseWebhookTag(tag) {
+		return []string{
+			"stgregistry.suse.com/" + defaultWebhook,
+			"registry.rancher.com/" + defaultWebhook,
+			"registry.suse.com/" + defaultWebhook,
+			"docker.io/" + defaultWebhook,
+		}
+	}
+	return []string{
+		"registry.suse.com/" + defaultWebhook,
+		"registry.rancher.com/" + defaultWebhook,
+		"stgregistry.suse.com/" + defaultWebhook,
+		"docker.io/" + defaultWebhook,
+	}
+}
+
+func isPrereleaseWebhookTag(tag string) bool {
+	tag = strings.TrimSpace(tag)
+	tag = strings.TrimPrefix(tag, "v")
+	return strings.Contains(tag, "-")
 }
 
 func (c githubClient) validateWebhookImage(ctx context.Context, image, expectedTag string) error {
@@ -1106,14 +1122,7 @@ func resolveSigningPolicy(input, registry string) (string, error) {
 	case "required", "report-only", "skip":
 		return input, nil
 	case "auto":
-		switch registry {
-		case "registry.suse.com", "stgregistry.suse.com", "registry.rancher.com":
-			return "required", nil
-		case "docker.io":
-			return "report-only", nil
-		default:
-			return "report-only", nil
-		}
+		return "report-only", nil
 	default:
 		return "", fmt.Errorf("unsupported signing policy %q", input)
 	}

@@ -43,6 +43,16 @@ func TestRenderReportIncludesNonSecretMetadata(t *testing.T) {
     }
   ]
 }`)
+	mustWrite(t, filepath.Join(dir, "webhook-signing.json"), `{
+  "target_version": "v2.14.1-alpha6",
+  "webhook_image": "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5",
+  "signing_policy": "required",
+  "enforced": true,
+  "signature_verified": false,
+  "provenance_verified": false,
+  "sbom_verified": false,
+  "verification_error": "no signatures found"
+}`)
 
 	report, err := renderReport(signoffPlan{
 		TargetVersion:      "v2.14.1-alpha6",
@@ -62,7 +72,7 @@ func TestRenderReportIncludesNonSecretMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"# v2.14.1-alpha6 Sign-Off Report", "`ha-test`", "`c-m-abc`", "`stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5`", "## Rancher Test Results", "`charts-webhook`", "`success`"} {
+	for _, want := range []string{"# v2.14.1-alpha6 Sign-Off Report", "`ha-test`", "`c-m-abc`", "`stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5`", "## Webhook Signing", "`no signatures found`", "## Rancher Test Results", "`charts-webhook`", "`success`"} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("expected report to contain %q:\n%s", want, report)
 		}

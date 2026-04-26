@@ -44,6 +44,7 @@ func TestLedgerRecordsSuccessfulLane(t *testing.T) {
   "signature_verified": true,
   "provenance_verified": true,
   "sbom_verified": true,
+  "verification_error": "not found",
   "claim_types": [
     "https://sigstore.dev/cosign/sign/v1",
     "https://slsa.dev/provenance/v1"
@@ -142,6 +143,7 @@ func TestLedgerRecordsSuccessfulLane(t *testing.T) {
 		`"signature_verified": true`,
 		`"provenance_verified": true`,
 		`"sbom_verified": true`,
+		`"verification_error": "not found"`,
 		`"https://sigstore.dev/cosign/sign/v1"`,
 		`"https://slsa.dev/provenance/v1"`,
 		`"rancher_install_resolution": {`,

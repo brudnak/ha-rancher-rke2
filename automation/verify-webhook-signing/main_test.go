@@ -31,8 +31,8 @@ esac
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.Enforced || !result.SignatureVerified || !result.ProvenanceVerified || !result.SBOMVerified {
-		t.Fatalf("expected enforced signing result with all checks true, got %+v", result)
+	if result.Enforced || !result.SignatureVerified || !result.ProvenanceVerified || !result.SBOMVerified {
+		t.Fatalf("expected reported signing result with all checks true, got %+v", result)
 	}
 	if !containsString(result.ClaimTypes, slsaProvenanceType) || !containsString(result.ClaimTypes, cosignSignType) {
 		t.Fatalf("expected both claim types, got %+v", result.ClaimTypes)
@@ -51,7 +51,7 @@ esac
 	}
 }
 
-func TestVerifyPlanFailsWhenSBOMIsMissing(t *testing.T) {
+func TestVerifyPlanReportsWhenSBOMIsMissing(t *testing.T) {
 	dir := t.TempDir()
 	slsactl := writeFakeSLSACTL(t, dir, filepath.Join(dir, "calls.log"), `
 case "$1" in
@@ -64,23 +64,64 @@ case "$1" in
 esac
 `)
 
-	_, err := verifyPlan(plan{
+	result, err := verifyPlan(plan{
 		TargetVersion: "v2.14.1-alpha7",
 		WebhookImage:  "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5",
 		SigningPolicy: "required",
 	}, slsactl, 10*time.Second)
-	if err == nil {
-		t.Fatal("expected missing SBOM to fail")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "SBOM") {
-		t.Fatalf("expected SBOM error, got %v", err)
+	if result.Enforced || result.SignatureVerified != true || result.ProvenanceVerified != true || result.SBOMVerified {
+		t.Fatalf("unexpected signing result: %+v", result)
+	}
+	if !strings.Contains(result.VerificationError, "SBOM") {
+		t.Fatalf("expected SBOM verification error, got %+v", result)
 	}
 }
 
-func TestVerifyPlanSkipsReportOnly(t *testing.T) {
+func TestVerifyPlanReportsSignatureFailure(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "calls.log")
 	slsactl := writeFakeSLSACTL(t, dir, logPath, `exit 1`)
+
+	result, err := verifyPlan(plan{
+		TargetVersion: "v2.14.1-alpha7",
+		WebhookImage:  "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5",
+		SigningPolicy: "required",
+	}, slsactl, 10*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Enforced || result.SignatureVerified || result.ProvenanceVerified || result.SBOMVerified {
+		t.Fatalf("unexpected signing result: %+v", result)
+	}
+	if !strings.Contains(result.VerificationError, "signature verification failed") {
+		t.Fatalf("expected verification error, got %+v", result)
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read calls: %v", err)
+	}
+	if !strings.Contains(string(got), "verify stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5") {
+		t.Fatalf("expected verify call, got %s", got)
+	}
+}
+
+func TestVerifyPlanChecksReportOnlyWithoutEnforcing(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls.log")
+	slsactl := writeFakeSLSACTL(t, dir, logPath, `
+case "$1" in
+  verify)
+    echo 'Verification for image --'
+    echo '[{"critical":{"type":"https://slsa.dev/provenance/v1"}},{"critical":{"type":"https://sigstore.dev/cosign/sign/v1"}}]'
+    ;;
+  download)
+    echo '{"SPDXID":"SPDXRef-DOCUMENT","creationInfo":{"created":"2026-04-26T00:00:00Z"}}'
+    ;;
+esac
+`)
 
 	result, err := verifyPlan(plan{
 		TargetVersion: "v2.14.1-alpha7",
@@ -90,8 +131,33 @@ func TestVerifyPlanSkipsReportOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if result.Enforced || !result.SignatureVerified || !result.SBOMVerified {
+		t.Fatalf("expected report-only signing result to be checked but non-enforced, got %+v", result)
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read calls: %v", err)
+	}
+	if !strings.Contains(string(got), "verify docker.io/rancher/rancher-webhook:v0.10.1-rc.5") {
+		t.Fatalf("expected verify call, got %s", got)
+	}
+}
+
+func TestVerifyPlanSkipsSkipPolicy(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls.log")
+	slsactl := writeFakeSLSACTL(t, dir, logPath, `exit 1`)
+
+	result, err := verifyPlan(plan{
+		TargetVersion: "v2.14.1-alpha7",
+		WebhookImage:  "docker.io/rancher/rancher-webhook:v0.10.1-rc.5",
+		SigningPolicy: "skip",
+	}, slsactl, 10*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if result.Enforced || result.SignatureVerified || result.SBOMVerified {
-		t.Fatalf("expected report-only signing result to be non-enforced, got %+v", result)
+		t.Fatalf("expected skip signing result to be non-enforced, got %+v", result)
 	}
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
 		t.Fatalf("expected fake slsactl not to be called, stat err=%v", err)
@@ -106,7 +172,7 @@ func TestWriteResultsWritesSingleResult(t *testing.T) {
 		WebhookImage:       "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5",
 		SigningPolicy:      "required",
 		Tool:               "slsactl",
-		Enforced:           true,
+		Enforced:           false,
 		SignatureVerified:  true,
 		ProvenanceVerified: true,
 		SBOMVerified:       true,
