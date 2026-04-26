@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	goversion "github.com/hashicorp/go-version"
 	"github.com/spf13/viper"
 )
 
@@ -123,15 +124,22 @@ func provisionLinodeDownstreamForHA(instanceNum int, haOutputs TerraformOutputs,
 		return err
 	}
 
-	k3sVersion, err := resolveK3SDefaultVersion(kubeconfigPath)
-	if err != nil {
-		return err
-	}
-
 	suffix := randomHex(4)
 	clusterName := dnsLabel(fmt.Sprintf("%s-ha%d-%s", namePrefix, instanceNum, suffix))
 	if runID != "" {
 		clusterName = dnsLabel(fmt.Sprintf("%s-%s-ha%d-%s", namePrefix, shortRunID(runID), instanceNum, suffix))
+	}
+
+	adminToken, err := createRancherAdminToken(haOutputs.RancherURL, viper.GetString("rancher.bootstrap_password"))
+	if err != nil {
+		return err
+	}
+	if err := configureRancherServerURL(haOutputs.RancherURL, adminToken); err != nil {
+		return err
+	}
+	k3sVersion, err := resolveK3SDefaultVersion(haOutputs.RancherURL, adminToken)
+	if err != nil {
+		return err
 	}
 
 	cfg := downstreamProvisioningConfig{
@@ -152,13 +160,6 @@ func provisionLinodeDownstreamForHA(instanceNum int, haOutputs TerraformOutputs,
 		return err
 	}
 
-	adminToken, err := createRancherAdminToken(haOutputs.RancherURL, viper.GetString("rancher.bootstrap_password"))
-	if err != nil {
-		return err
-	}
-	if err := configureRancherServerURL(haOutputs.RancherURL, adminToken); err != nil {
-		return err
-	}
 	machineName, err := createLinodeMachineConfig(haOutputs.RancherURL, adminToken, cfg)
 	if err != nil {
 		_ = runKubectlDirect(kubeconfigPath, "delete", "secret", cfg.SecretName, "-n", "cattle-global-data", "--ignore-not-found=true")
@@ -369,31 +370,71 @@ func waitForProvisioningClusterDeleted(kubeconfigPath, namespace, clusterName st
 	return fmt.Errorf("timed out after %s waiting for downstream cluster %s deletion", timeout, clusterName)
 }
 
-func resolveK3SDefaultVersion(kubeconfigPath string) (string, error) {
+func resolveK3SDefaultVersion(rancherURL, bearerToken string) (string, error) {
 	if explicit := strings.TrimSpace(os.Getenv("K3S_VERSION")); explicit != "" {
 		return normalizeK3SVersion(explicit), nil
 	}
 
-	output, err := runKubectlOutput(kubeconfigPath, "get", "settings.management.cattle.io", "k3s-default-version", "-o", "json")
+	version, err := latestK3SReleaseVersionFromRancher(rancherURL, bearerToken)
 	if err != nil {
-		return "", fmt.Errorf("failed to read Rancher k3s-default-version setting: %w", err)
+		return "", err
+	}
+	log.Printf("[downstream] Selected K3s version %s from Rancher KDM release list", version)
+	return version, nil
+}
+
+func latestK3SReleaseVersionFromRancher(rancherURL, bearerToken string) (string, error) {
+	rancherURL = strings.TrimRight(clickableURL(rancherURL), "/")
+	if strings.TrimSpace(bearerToken) == "" {
+		return "", fmt.Errorf("bearer token must not be empty")
 	}
 
-	var setting struct {
-		Value       string `json:"value"`
-		Default     string `json:"default"`
-		DefaultBool string `json:"defaultBool"`
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
 	}
-	if err := json.Unmarshal([]byte(output), &setting); err != nil {
-		return "", fmt.Errorf("failed to parse k3s-default-version setting: %w", err)
+
+	var out struct {
+		Data []k3sRelease `json:"data"`
 	}
-	if strings.TrimSpace(setting.Value) != "" {
-		return normalizeK3SVersion(setting.Value), nil
+	apiURL := rancherURL + "/v1-k3s-release/releases"
+	if err := getRancherJSON(client, apiURL, bearerToken, &out); err != nil {
+		return "", fmt.Errorf("failed to read Rancher K3s release list: %w", err)
 	}
-	if strings.TrimSpace(setting.Default) != "" {
-		return normalizeK3SVersion(setting.Default), nil
+	return selectLatestK3SReleaseVersion(out.Data)
+}
+
+type k3sRelease struct {
+	Version    string                 `json:"version"`
+	ServerArgs map[string]interface{} `json:"serverArgs"`
+	AgentArgs  map[string]interface{} `json:"agentArgs"`
+}
+
+func selectLatestK3SReleaseVersion(releases []k3sRelease) (string, error) {
+	var selectedVersion *goversion.Version
+	selectedOriginal := ""
+
+	for _, release := range releases {
+		version := normalizeK3SVersion(release.Version)
+		if version == "" || release.ServerArgs == nil || release.AgentArgs == nil {
+			continue
+		}
+		parsed, err := goversion.NewVersion(strings.TrimPrefix(version, "v"))
+		if err != nil {
+			continue
+		}
+		if selectedVersion == nil || selectedVersion.LessThan(parsed) || (selectedVersion.Equal(parsed) && version > selectedOriginal) {
+			selectedVersion = parsed
+			selectedOriginal = version
+		}
 	}
-	return "", fmt.Errorf("k3s-default-version setting was empty; set K3S_VERSION explicitly")
+
+	if selectedOriginal == "" {
+		return "", fmt.Errorf("Rancher K3s release list did not contain any provisionable versions")
+	}
+	return selectedOriginal, nil
 }
 
 func normalizeK3SVersion(version string) string {

@@ -34,6 +34,11 @@ on:
   schedule:
     # everything is 19
     - cron: "19 * * * *"
+  workflow_run:
+    workflows:
+      - Run Alpha/Webhook Sign-Off
+    types:
+      - completed
 
 permissions:
   actions: write
@@ -88,7 +93,8 @@ jobs:
       - name: Build dispatch queue
         id: dispatch-queue
         env:
-          DISPATCH_ENABLED: ${{ github.event_name == 'schedule' || github.event.inputs.dispatch_runs == 'true' }}
+          DISPATCH_REQUESTED: ${{ github.event_name == 'schedule' || github.event.inputs.dispatch_runs == 'true' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -108,7 +114,17 @@ jobs:
                 }]
           ' signoff-plan.json > automation-output/signoff-dispatch-queue.json
 
-          if [ "$DISPATCH_ENABLED" = "true" ]; then
+          active_runner_count="$(gh run list \
+            --workflow run-alpha-webhook-signoff.yml \
+            --json status \
+            --jq '[.[] | select(.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "requested" or .status == "waiting")] | length')"
+
+          dispatch_enabled="$DISPATCH_REQUESTED"
+          if [ "$dispatch_enabled" = "true" ] && [ "$active_runner_count" != "0" ]; then
+            dispatch_enabled="false"
+          fi
+
+          if [ "$dispatch_enabled" = "true" ]; then
             jq '.[0:1]' automation-output/signoff-dispatch-queue.json > automation-output/signoff-dispatch-selected.json
           else
             printf '[]\n' > automation-output/signoff-dispatch-selected.json
@@ -117,7 +133,9 @@ jobs:
           queue_count="$(jq 'length' automation-output/signoff-dispatch-queue.json)"
           selected_count="$(jq 'length' automation-output/signoff-dispatch-selected.json)"
           {
-            echo "enabled=$DISPATCH_ENABLED"
+            echo "requested=$DISPATCH_REQUESTED"
+            echo "enabled=$dispatch_enabled"
+            echo "active_runner_count=$active_runner_count"
             echo "queue_count=$queue_count"
             echo "selected_count=$selected_count"
           } >> "$GITHUB_OUTPUT"
@@ -172,6 +190,8 @@ jobs:
             cat signoff-plan.json
             echo '```'
             echo ""
+            echo "Dispatch requested: \`${{ steps.dispatch-queue.outputs.requested }}\`."
+            echo "Active lane runners: \`${{ steps.dispatch-queue.outputs.active_runner_count }}\`."
             echo "Dispatch queue: \`${{ steps.dispatch-queue.outputs.queue_count }}\` lane(s); selected: \`${{ steps.dispatch-queue.outputs.selected_count }}\`."
           } >> "$GITHUB_STEP_SUMMARY"
 

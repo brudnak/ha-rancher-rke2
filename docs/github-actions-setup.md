@@ -111,10 +111,11 @@ After environments, secrets, and variables are configured:
    newer. Downstream webhook lanes run webhook security settings for Rancher
    2.14 and newer when the actual Rancher chart should contain those settings.
 6. After manual smoke is clean, leave `Plan Alpha/Webhook Sign-Off` scheduled.
-   It runs hourly at minute 19 and dispatches one uncovered lane at a time. If
-   the ledger-filtered plan has no remaining lanes, it dispatches nothing. This
-   keeps the globally serialized runner from losing pending jobs to GitHub
-   Actions concurrency behavior while the ledger steadily advances the queue.
+   It runs hourly at minute 19 as a safety net and dispatches one uncovered lane
+   at a time only when no lane runner is already queued or running. Successful
+   lane runs also wake the planner through GitHub's `workflow_run` event, so the
+   next lane starts as soon as the globally serialized runner is free. If the
+   ledger-filtered plan has no remaining lanes, it dispatches nothing.
 
 Use `keep_infra_on_failure=true` only for manual debugging. It can leave AWS and
 Linode resources running.

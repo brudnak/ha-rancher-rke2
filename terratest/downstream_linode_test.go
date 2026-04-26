@@ -100,6 +100,23 @@ func TestNormalizeK3SVersion(t *testing.T) {
 	}
 }
 
+func TestSelectLatestK3SReleaseVersion(t *testing.T) {
+	releases := []k3sRelease{
+		{Version: "v1.35.3+k3s1"},
+		{Version: "v1.33.8+k3s1", ServerArgs: map[string]interface{}{}, AgentArgs: map[string]interface{}{}},
+		{Version: "v1.34.6+k3s1", ServerArgs: map[string]interface{}{}, AgentArgs: map[string]interface{}{}},
+		{Version: "v1.35.2+k3s1", ServerArgs: map[string]interface{}{}, AgentArgs: map[string]interface{}{}},
+	}
+
+	got, err := selectLatestK3SReleaseVersion(releases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "v1.35.2+k3s1" {
+		t.Fatalf("selectLatestK3SReleaseVersion() = %q, want %q", got, "v1.35.2+k3s1")
+	}
+}
+
 func TestShortRunID(t *testing.T) {
 	if got := shortRunID("1234567890"); got != "34567890" {
 		t.Fatalf("shortRunID() = %q", got)

@@ -145,6 +145,34 @@ func postRancherJSON(client *http.Client, url, bearerToken string, payload inter
 	return nil
 }
 
+func getRancherJSON(client *http.Client, url, bearerToken string, out interface{}) error {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("Rancher API GET %s returned HTTP %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("failed to parse Rancher API response from %s: %w", url, err)
+	}
+	return nil
+}
+
 func putRancherJSON(client *http.Client, url, bearerToken string, payload interface{}) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
