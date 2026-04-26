@@ -31,6 +31,10 @@ on:
         required: true
         default: false
         type: boolean
+      ignore_active_runner_id:
+        description: Active Run Alpha/Webhook Sign-Off run id to ignore when this planner was woken by that runner.
+        required: false
+        type: string
   schedule:
     # everything is 19
     - cron: "19 * * * *"
@@ -94,6 +98,7 @@ jobs:
         id: dispatch-queue
         env:
           DISPATCH_REQUESTED: ${{ github.event_name == 'schedule' || github.event.inputs.dispatch_runs == 'true' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
+          IGNORE_ACTIVE_RUNNER_ID: ${{ github.event.inputs.ignore_active_runner_id || '' }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -116,8 +121,8 @@ jobs:
 
           active_runner_count="$(gh run list \
             --workflow run-alpha-webhook-signoff.yml \
-            --json status \
-            --jq '[.[] | select(.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "requested" or .status == "waiting")] | length')"
+            --json databaseId,status \
+            --jq '[.[] | select((.databaseId | tostring) != env.IGNORE_ACTIVE_RUNNER_ID) | select(.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "requested" or .status == "waiting")] | length')"
 
           dispatch_enabled="$DISPATCH_REQUESTED"
           if [ "$dispatch_enabled" = "true" ] && [ "$active_runner_count" != "0" ]; then
@@ -136,6 +141,7 @@ jobs:
             echo "requested=$DISPATCH_REQUESTED"
             echo "enabled=$dispatch_enabled"
             echo "active_runner_count=$active_runner_count"
+            echo "ignored_active_runner_id=$IGNORE_ACTIVE_RUNNER_ID"
             echo "queue_count=$queue_count"
             echo "selected_count=$selected_count"
           } >> "$GITHUB_OUTPUT"
@@ -192,6 +198,7 @@ jobs:
             echo ""
             echo "Dispatch requested: \`${{ steps.dispatch-queue.outputs.requested }}\`."
             echo "Active lane runners: \`${{ steps.dispatch-queue.outputs.active_runner_count }}\`."
+            echo "Ignored active runner id: \`${{ steps.dispatch-queue.outputs.ignored_active_runner_id }}\`."
             echo "Dispatch queue: \`${{ steps.dispatch-queue.outputs.queue_count }}\` lane(s); selected: \`${{ steps.dispatch-queue.outputs.selected_count }}\`."
           } >> "$GITHUB_STEP_SUMMARY"
 

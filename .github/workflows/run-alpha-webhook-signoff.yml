@@ -52,6 +52,7 @@ on:
         type: string
 
 permissions:
+  actions: write
   contents: write
   id-token: write
 
@@ -578,3 +579,23 @@ jobs:
             echo "- Rancher tests outcome: \`${{ steps.rancher_tests.outcome }}\`"
             echo "- Cleanup requested: \`${{ inputs.keep_infra_on_failure == false || (steps.setup.outcome == 'success' && steps.ready.outcome == 'success' && (inputs.lane == 'fresh-alpha-local-suites' || steps.downstream.outcome == 'success') && (inputs.lane != 'upgrade-alpha' || steps.upgrade.outcome == 'success') && (inputs.lane != 'previous-with-candidate-webhook' || (steps.local_webhook.outcome == 'success' && steps.downstream_webhook.outcome == 'success')) && (inputs.run_rancher_tests == false || steps.rancher_tests.outcome == 'success')) }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  wake-planner:
+    name: Wake sign-off planner
+    needs: run-lane
+    if: ${{ needs.run-lane.result == 'success' && inputs.run_rancher_tests == true }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      - name: Dispatch planner for next lane
+        run: |
+          set -euo pipefail
+
+          gh workflow run signoff-plan.yml \
+            --repo "$GH_REPO" \
+            --ref "$REF_NAME" \
+            -f "dispatch_runs=true" \
+            -f "ignore_active_runner_id=${{ github.run_id }}"

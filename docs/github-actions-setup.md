@@ -113,8 +113,8 @@ After environments, secrets, and variables are configured:
 6. After manual smoke is clean, leave `Plan Alpha/Webhook Sign-Off` scheduled.
    It runs hourly at minute 19 as a safety net and dispatches one uncovered lane
    at a time only when no lane runner is already queued or running. Successful
-   lane runs also wake the planner through GitHub's `workflow_run` event, so the
-   next lane starts as soon as the globally serialized runner is free. If the
+   lane runs explicitly wake the planner through `workflow_dispatch`, so the next
+   lane starts as soon as the globally serialized runner is free. If the
    ledger-filtered plan has no remaining lanes, it dispatches nothing.
 
 ## Ignoring Known-Bad Targets
