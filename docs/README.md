@@ -40,7 +40,9 @@ forks can ignore it unless they intentionally configure their own cloud accounts
 
 Current workflow layers:
 
-- `signoff-plan.yml`: safe scheduled/manual planner only.
+- `signoff-plan.yml`: safe scheduled/manual planner. Scheduled runs dispatch
+  the next uncovered ledger lane; manual runs dispatch only when
+  `dispatch_runs=true`.
 - `bootstrap-terraform-state.yml`: manual S3/DynamoDB backend bootstrap, plan-only unless `apply=true`.
 - `run-alpha-webhook-signoff.yml`: manual sign-off lane runner for `fresh-alpha`, `upgrade-alpha`, `previous-with-candidate-webhook`, or `fresh-alpha-local-suites`, with automatic Helm repo setup, Rancher readiness gates, optional Linode downstream provisioning, webhook overrides, optional direct `rancher/tests` suites, Markdown reporting, and automatic cleanup.
 ## Actions Visibility And State Bootstrap

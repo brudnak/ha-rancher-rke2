@@ -85,7 +85,7 @@ generated Linode root password before noisy provisioning steps.
 
 | Workflow | Creates cloud resources | Notes |
 | --- | --- | --- |
-| `signoff-plan.yml` | no | Scheduled/manual plan generation only. Safe first workflow. |
+| `signoff-plan.yml` | no, but it can dispatch the runner | Scheduled/manual plan generation. Scheduled runs dispatch the next uncovered sign-off lane from the ledger-filtered plan. Manual runs only dispatch when `dispatch_runs=true`. |
 | `bootstrap-terraform-state.yml` | yes, only when `apply=true` | Creates or updates the persistent S3/DynamoDB backend. |
 | `run-alpha-webhook-signoff.yml` | yes | Runs one alpha/webhook sign-off lane, optionally with Linode downstreams and direct `rancher/tests` suite runs, then cleans up. |
 
@@ -94,7 +94,7 @@ generated Linode root password before noisy provisioning steps.
 After environments, secrets, and variables are configured:
 
 1. Run `Plan Alpha/Webhook Sign-Off` manually for a known alpha, for example
-   `v2.13.5-alpha5`.
+   `v2.13.5-alpha5`, with `dispatch_runs=false`.
 2. Run `Run Alpha/Webhook Sign-Off` with:
    - `rancher_version`: `v2.13.5-alpha5`
    - `lane`: `fresh-alpha-local-suites`
@@ -107,8 +107,13 @@ After environments, secrets, and variables are configured:
 5. After those are clean, enable `run_rancher_tests=true` to clone
    `https://github.com/rancher/tests.git` and run the lane's suites in the same
    workflow job. The local-suite lane runs framework regression plus VAI
-   disabled for Rancher 2.11 and older, VAI enabled for Rancher 2.12 and newer,
-   and webhook security settings for Rancher 2.14 and newer.
+   disabled for Rancher 2.11 and older and VAI enabled for Rancher 2.12 and
+   newer. Downstream webhook lanes run webhook security settings for Rancher
+   2.14 and newer when the actual Rancher chart should contain those settings.
+6. After manual smoke is clean, leave `Plan Alpha/Webhook Sign-Off` scheduled.
+   It runs at minute 19 and dispatches one uncovered lane at a time. This keeps
+   the globally serialized runner from losing pending jobs to GitHub Actions
+   concurrency behavior while the ledger steadily advances the queue.
 
 Use `keep_infra_on_failure=true` only for manual debugging. It can leave AWS and
 Linode resources running.

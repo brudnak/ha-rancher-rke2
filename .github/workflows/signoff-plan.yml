@@ -26,11 +26,17 @@ on:
           - required
           - report-only
           - skip
+      dispatch_runs:
+        description: Dispatch the next uncovered sign-off lane after planning.
+        required: true
+        default: false
+        type: boolean
   schedule:
     # everything is 19
     - cron: "19 3,11,19 * * *"
 
 permissions:
+  actions: write
   contents: read
 
 jobs:
@@ -79,6 +85,84 @@ jobs:
 
           "$RUNNER_TEMP/signoff-plan" "${args[@]}"
 
+      - name: Build dispatch queue
+        id: dispatch-queue
+        env:
+          DISPATCH_ENABLED: ${{ github.event_name == 'schedule' || github.event.inputs.dispatch_runs == 'true' }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p automation-output
+          jq -c '
+            def planned:
+              if has("plans") then .plans[] else . end;
+
+            [planned as $plan
+              | ($plan.lanes // [])[]
+              | {
+                  rancher_version: $plan.target_version,
+                  lane: .name,
+                  previous_rancher_version: ($plan.previous_version // ""),
+                  webhook_image: ($plan.webhook_image // ""),
+                  signing_policy: ($plan.signing_policy_input // "auto")
+                }]
+          ' signoff-plan.json > automation-output/signoff-dispatch-queue.json
+
+          if [ "$DISPATCH_ENABLED" = "true" ]; then
+            jq '.[0:1]' automation-output/signoff-dispatch-queue.json > automation-output/signoff-dispatch-selected.json
+          else
+            printf '[]\n' > automation-output/signoff-dispatch-selected.json
+          fi
+
+          queue_count="$(jq 'length' automation-output/signoff-dispatch-queue.json)"
+          selected_count="$(jq 'length' automation-output/signoff-dispatch-selected.json)"
+          {
+            echo "enabled=$DISPATCH_ENABLED"
+            echo "queue_count=$queue_count"
+            echo "selected_count=$selected_count"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch next sign-off lane
+        if: steps.dispatch-queue.outputs.enabled == 'true' && steps.dispatch-queue.outputs.selected_count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo ""
+            echo "## Dispatched sign-off lane"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          jq -c '.[]' automation-output/signoff-dispatch-selected.json | while IFS= read -r item; do
+            rancher_version="$(jq -r '.rancher_version' <<<"$item")"
+            lane="$(jq -r '.lane' <<<"$item")"
+            previous_rancher_version="$(jq -r '.previous_rancher_version' <<<"$item")"
+            webhook_image="$(jq -r '.webhook_image' <<<"$item")"
+            signing_policy="$(jq -r '.signing_policy' <<<"$item")"
+
+            args=(
+              workflow run run-alpha-webhook-signoff.yml
+              --ref "$REF_NAME"
+              -f "rancher_version=$rancher_version"
+              -f "lane=$lane"
+              -f "signing_policy=$signing_policy"
+              -f "keep_infra_on_failure=false"
+              -f "run_rancher_tests=true"
+            )
+            if [ -n "$previous_rancher_version" ]; then
+              args+=(-f "previous_rancher_version=$previous_rancher_version")
+            fi
+            if [ -n "$webhook_image" ]; then
+              args+=(-f "webhook_image=$webhook_image")
+            fi
+
+            gh "${args[@]}"
+            echo "- \`$rancher_version\` / \`$lane\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
       - name: Write step summary
         run: |
           {
@@ -87,10 +171,15 @@ jobs:
             echo '```json'
             cat signoff-plan.json
             echo '```'
+            echo ""
+            echo "Dispatch queue: \`${{ steps.dispatch-queue.outputs.queue_count }}\` lane(s); selected: \`${{ steps.dispatch-queue.outputs.selected_count }}\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signoff-plan
-          path: signoff-plan.json
+          path: |
+            signoff-plan.json
+            automation-output/signoff-dispatch-queue.json
+            automation-output/signoff-dispatch-selected.json
