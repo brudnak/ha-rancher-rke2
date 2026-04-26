@@ -17,12 +17,13 @@ import (
 )
 
 const (
-	rancherRepo      = "rancher/rancher"
-	defaultWebhook   = "rancher/rancher-webhook"
-	laneFreshAlpha   = "fresh-alpha"
-	laneUpgradeAlpha = "upgrade-alpha"
-	laneOldWebhook   = "previous-with-candidate-webhook"
-	laneLocalSuites  = "fresh-alpha-local-suites"
+	rancherRepo           = "rancher/rancher"
+	defaultWebhook        = "rancher/rancher-webhook"
+	currentCoveragePolicy = "alpha-webhook-signoff-v2"
+	laneFreshAlpha        = "fresh-alpha"
+	laneUpgradeAlpha      = "upgrade-alpha"
+	laneOldWebhook        = "previous-with-candidate-webhook"
+	laneLocalSuites       = "fresh-alpha-local-suites"
 )
 
 var (
@@ -30,6 +31,13 @@ var (
 	releaseVersionRE = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)$`)
 	webhookBuildRE   = regexp.MustCompile(`(?m)^\s*webhookVersion:\s*["']?([^"'\s]+)["']?\s*$`)
 )
+
+var defaultWebhookImageCandidates = []string{
+	"stgregistry.suse.com/" + defaultWebhook,
+	"registry.rancher.com/" + defaultWebhook,
+	"registry.suse.com/" + defaultWebhook,
+	"docker.io/" + defaultWebhook,
+}
 
 type plan struct {
 	TargetVersion        string        `json:"target_version"`
@@ -79,9 +87,10 @@ type signoffLedger struct {
 }
 
 type ledgerEntry struct {
-	Status      string `json:"status"`
-	RunID       string `json:"run_id"`
-	CompletedAt string `json:"completed_at"`
+	Status         string `json:"status"`
+	CoveragePolicy string `json:"coverage_policy"`
+	RunID          string `json:"run_id"`
+	CompletedAt    string `json:"completed_at"`
 }
 
 type semver struct {
@@ -99,10 +108,11 @@ type release struct {
 }
 
 type githubClient struct {
-	token      string
-	httpClient *http.Client
-	apiBaseURL string
-	rawBaseURL string
+	token            string
+	httpClient       *http.Client
+	apiBaseURL       string
+	rawBaseURL       string
+	registryBaseURLs map[string]string
 }
 
 func main() {
@@ -121,7 +131,7 @@ func main() {
 
 	flag.StringVar(&targetVersion, "rancher-version", "", "target Rancher alpha tag, for example v2.14.1-alpha6")
 	flag.StringVar(&previousVersion, "previous-rancher-version", "", "previous Rancher release tag; resolved automatically when omitted")
-	flag.StringVar(&webhookImage, "webhook-image", "", "candidate webhook image; defaults to docker.io/rancher/rancher-webhook:<target webhook tag>")
+	flag.StringVar(&webhookImage, "webhook-image", "", "candidate webhook image; when omitted, probes staging SUSE, Prime, public SUSE, then Docker Hub for the target webhook tag")
 	flag.StringVar(&signingPolicy, "signing-policy", "auto", "required, report-only, skip, or auto")
 	flag.StringVar(&outputPath, "output", "", "optional JSON output path")
 	flag.StringVar(&runID, "run-id", os.Getenv("GITHUB_RUN_ID"), "workflow run id used to generate per-lane Terraform state keys")
@@ -255,10 +265,17 @@ func buildPlan(ctx context.Context, client githubClient, targetVersion, previous
 	}
 
 	if strings.TrimSpace(webhookImage) == "" {
-		webhookImage = fmt.Sprintf("docker.io/%s:%s", defaultWebhook, targetWebhookTag)
+		resolvedImage, err := client.resolveWebhookImage(ctx, targetWebhookTag)
+		if err != nil {
+			return plan{}, err
+		}
+		webhookImage = resolvedImage
 	}
 	registry, _, _, err := parseImage(webhookImage)
 	if err != nil {
+		return plan{}, err
+	}
+	if err := client.validateWebhookImage(ctx, webhookImage, targetWebhookTag); err != nil {
 		return plan{}, err
 	}
 	resolvedPolicy, err := resolveSigningPolicy(signingPolicyInput, registry)
@@ -356,7 +373,7 @@ func applyLedgerSkips(p plan, ledger signoffLedger) plan {
 	remaining := make([]lane, 0, len(p.Lanes))
 	for _, lane := range p.Lanes {
 		entry, ok := byLane[lane.Name]
-		if !ok || entry.Status != "success" {
+		if !ok || entry.Status != "success" || entry.CoveragePolicy != currentCoveragePolicy {
 			remaining = append(remaining, lane)
 			continue
 		}
@@ -648,6 +665,180 @@ func (c githubClient) webhookBuild(ctx context.Context, tag string) (string, err
 	return parseWebhookBuild(string(body))
 }
 
+func (c githubClient) resolveWebhookImage(ctx context.Context, tag string) (string, error) {
+	var failures []string
+	for _, repository := range defaultWebhookImageCandidates {
+		image := repository + ":" + tag
+		registry, repo, _, err := parseImage(image)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", image, err))
+			continue
+		}
+		found, err := c.registryImageTagExists(ctx, registry, repo, tag)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", image, err))
+			continue
+		}
+		if found {
+			return image, nil
+		}
+		failures = append(failures, image+": tag not found")
+	}
+
+	return "", fmt.Errorf("webhook image tag %s was not found in candidate registries: %s", tag, strings.Join(failures, "; "))
+}
+
+func (c githubClient) validateWebhookImage(ctx context.Context, image, expectedTag string) error {
+	registry, repository, tag, err := parseImage(image)
+	if err != nil {
+		return err
+	}
+	if tag != expectedTag {
+		return fmt.Errorf("webhook image %s uses tag %s, expected %s from Rancher build.yaml", image, tag, expectedTag)
+	}
+	found, err := c.registryImageTagExists(ctx, registry, repository, tag)
+	if err != nil {
+		return fmt.Errorf("validate webhook image %s: %w", image, err)
+	}
+	if !found {
+		return fmt.Errorf("webhook image %s was not found in registry", image)
+	}
+	return nil
+}
+
+func (c githubClient) registryImageTagExists(ctx context.Context, registry, repository, tag string) (bool, error) {
+	url := fmt.Sprintf("%s/v2/%s/manifests/%s", c.registryBase(registry), repository, tag)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Accept", strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	}, ", "))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	case http.StatusUnauthorized:
+		token, err := c.registryBearerToken(ctx, resp.Header.Get("WWW-Authenticate"))
+		if err != nil {
+			return false, err
+		}
+		return c.registryImageTagExistsWithToken(ctx, url, token)
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return false, fmt.Errorf("registry manifest lookup failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+}
+
+func (c githubClient) registryImageTagExistsWithToken(ctx context.Context, manifestURL, token string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, manifestURL, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	}, ", "))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return false, fmt.Errorf("registry authenticated manifest lookup failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+}
+
+func (c githubClient) registryBearerToken(ctx context.Context, authenticate string) (string, error) {
+	params, err := parseBearerChallenge(authenticate)
+	if err != nil {
+		return "", err
+	}
+	realm := params["realm"]
+	if realm == "" {
+		return "", fmt.Errorf("registry Bearer challenge missing realm")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, realm, nil)
+	if err != nil {
+		return "", err
+	}
+	query := req.URL.Query()
+	if service := params["service"]; service != "" {
+		query.Set("service", service)
+	}
+	if scope := params["scope"]; scope != "" {
+		query.Set("scope", scope)
+	}
+	req.URL.RawQuery = query.Encode()
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("registry token request failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var tokenResponse struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResponse); err != nil {
+		return "", err
+	}
+	token := tokenResponse.Token
+	if token == "" {
+		token = tokenResponse.AccessToken
+	}
+	if token == "" {
+		return "", fmt.Errorf("registry token response did not include a token")
+	}
+	return token, nil
+}
+
+func parseBearerChallenge(value string) (map[string]string, error) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(strings.ToLower(value), "bearer ") {
+		return nil, fmt.Errorf("unsupported registry auth challenge %q", value)
+	}
+	value = strings.TrimSpace(value[len("Bearer "):])
+	params := map[string]string{}
+	for _, part := range strings.Split(value, ",") {
+		key, rawValue, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		params[strings.ToLower(strings.TrimSpace(key))] = strings.Trim(strings.TrimSpace(rawValue), `"`)
+	}
+	return params, nil
+}
+
 func (c githubClient) addHeaders(req *http.Request) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "ha-rancher-rke2-signoff-plan")
@@ -668,6 +859,18 @@ func (c githubClient) rawBase() string {
 		return strings.TrimRight(c.rawBaseURL, "/")
 	}
 	return "https://raw.githubusercontent.com"
+}
+
+func (c githubClient) registryBase(registry string) string {
+	if c.registryBaseURLs != nil {
+		if base := c.registryBaseURLs[registry]; base != "" {
+			return strings.TrimRight(base, "/")
+		}
+	}
+	if registry == "docker.io" {
+		return "https://registry-1.docker.io"
+	}
+	return "https://" + registry
 }
 
 func parseWebhookBuild(buildYAML string) (string, error) {
@@ -764,7 +967,7 @@ func resolveSigningPolicy(input, registry string) (string, error) {
 		return input, nil
 	case "auto":
 		switch registry {
-		case "registry.suse.com", "stgregistry.suse.com":
+		case "registry.suse.com", "stgregistry.suse.com", "registry.rancher.com":
 			return "required", nil
 		case "docker.io":
 			return "report-only", nil

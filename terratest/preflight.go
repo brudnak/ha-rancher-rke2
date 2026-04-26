@@ -110,6 +110,30 @@ func validateSecretEnvironment() error {
 	return nil
 }
 
+func validateWebhookImagePreflight() error {
+	webhookImage := strings.TrimSpace(os.Getenv("RANCHER_WEBHOOK_IMAGE"))
+	if webhookImage == "" {
+		log.Printf("[preflight] No RANCHER_WEBHOOK_IMAGE set; skipping explicit webhook image manifest check")
+		return nil
+	}
+
+	log.Printf("[preflight] Validating webhook image manifest before provisioning: %s", webhookImage)
+	registry, repository, tag, err := parseRegistryImage(webhookImage)
+	if err != nil {
+		return err
+	}
+	found, err := registryImageTagExists(registry, repository, tag)
+	if err != nil {
+		return fmt.Errorf("validate webhook image %s: %w", webhookImage, err)
+	}
+	if !found {
+		return fmt.Errorf("webhook image %s was not found in registry", webhookImage)
+	}
+
+	log.Printf("[preflight] Webhook image manifest validated successfully")
+	return nil
+}
+
 func loadSecretEnvironmentFromZProfile() {
 	desiredVars := []string{
 		"AWS_ACCESS_KEY_ID",

@@ -10,15 +10,24 @@ import (
 	"time"
 )
 
+const (
+	ledgerSchemaVersion   = 2
+	currentCoveragePolicy = "alpha-webhook-signoff-v2"
+)
+
 type signoffPlan struct {
-	TargetVersion      string        `json:"target_version"`
-	ReleaseLine        string        `json:"release_line"`
-	PreviousVersion    string        `json:"previous_version"`
-	TargetWebhookTag   string        `json:"target_webhook_tag"`
-	PreviousWebhookTag string        `json:"previous_webhook_tag"`
-	WebhookChanged     bool          `json:"webhook_changed"`
-	WebhookImage       string        `json:"webhook_image"`
-	Lanes              []signoffLane `json:"lanes"`
+	TargetVersion        string        `json:"target_version"`
+	ReleaseLine          string        `json:"release_line"`
+	PreviousVersion      string        `json:"previous_version"`
+	TargetWebhookBuild   string        `json:"target_webhook_build"`
+	TargetWebhookTag     string        `json:"target_webhook_tag"`
+	PreviousWebhookBuild string        `json:"previous_webhook_build"`
+	PreviousWebhookTag   string        `json:"previous_webhook_tag"`
+	WebhookChanged       bool          `json:"webhook_changed"`
+	WebhookImage         string        `json:"webhook_image"`
+	SigningPolicy        string        `json:"signing_policy"`
+	SigningRegistry      string        `json:"signing_registry"`
+	Lanes                []signoffLane `json:"lanes"`
 }
 
 type signoffLane struct {
@@ -34,23 +43,28 @@ type ledger struct {
 }
 
 type entry struct {
-	Status             string `json:"status"`
-	RunID              string `json:"run_id"`
-	RunURL             string `json:"run_url,omitempty"`
-	Workflow           string `json:"workflow,omitempty"`
-	Lane               string `json:"lane"`
-	ReleaseLine        string `json:"release_line"`
-	TargetVersion      string `json:"target_version"`
-	PreviousVersion    string `json:"previous_version,omitempty"`
-	InstallRancher     string `json:"install_rancher"`
-	UpgradeToRancher   string `json:"upgrade_to_rancher,omitempty"`
-	WebhookChanged     bool   `json:"webhook_changed"`
-	WebhookImage       string `json:"webhook_image,omitempty"`
-	WebhookOverride    string `json:"webhook_override_image,omitempty"`
-	PreviousWebhookTag string `json:"previous_webhook_tag,omitempty"`
-	TargetWebhookTag   string `json:"target_webhook_tag,omitempty"`
-	CommitSHA          string `json:"commit_sha,omitempty"`
-	CompletedAt        string `json:"completed_at"`
+	Status               string `json:"status"`
+	CoveragePolicy       string `json:"coverage_policy"`
+	RunID                string `json:"run_id"`
+	RunURL               string `json:"run_url,omitempty"`
+	Workflow             string `json:"workflow,omitempty"`
+	Lane                 string `json:"lane"`
+	ReleaseLine          string `json:"release_line"`
+	TargetVersion        string `json:"target_version"`
+	PreviousVersion      string `json:"previous_version,omitempty"`
+	InstallRancher       string `json:"install_rancher"`
+	UpgradeToRancher     string `json:"upgrade_to_rancher,omitempty"`
+	WebhookChanged       bool   `json:"webhook_changed"`
+	WebhookImage         string `json:"webhook_image,omitempty"`
+	WebhookOverride      string `json:"webhook_override_image,omitempty"`
+	PreviousWebhookBuild string `json:"previous_webhook_build,omitempty"`
+	PreviousWebhookTag   string `json:"previous_webhook_tag,omitempty"`
+	TargetWebhookBuild   string `json:"target_webhook_build,omitempty"`
+	TargetWebhookTag     string `json:"target_webhook_tag,omitempty"`
+	SigningPolicy        string `json:"signing_policy,omitempty"`
+	SigningRegistry      string `json:"signing_registry,omitempty"`
+	CommitSHA            string `json:"commit_sha,omitempty"`
+	CompletedAt          string `json:"completed_at"`
 }
 
 func main() {
@@ -97,9 +111,7 @@ func main() {
 	if err != nil {
 		fatalf("read ledger: %v", err)
 	}
-	if l.SchemaVersion == 0 {
-		l.SchemaVersion = 1
-	}
+	l.SchemaVersion = ledgerSchemaVersion
 	if l.Entries == nil {
 		l.Entries = map[string]map[string]entry{}
 	}
@@ -107,23 +119,28 @@ func main() {
 		l.Entries[plan.TargetVersion] = map[string]entry{}
 	}
 	l.Entries[plan.TargetVersion][lane.Name] = entry{
-		Status:             strings.TrimSpace(status),
-		RunID:              strings.TrimSpace(runID),
-		RunURL:             strings.TrimSpace(runURL),
-		Workflow:           strings.TrimSpace(workflow),
-		Lane:               lane.Name,
-		ReleaseLine:        plan.ReleaseLine,
-		TargetVersion:      plan.TargetVersion,
-		PreviousVersion:    plan.PreviousVersion,
-		InstallRancher:     lane.InstallRancher,
-		UpgradeToRancher:   lane.UpgradeToRancher,
-		WebhookChanged:     plan.WebhookChanged,
-		WebhookImage:       plan.WebhookImage,
-		WebhookOverride:    lane.WebhookOverrideImage,
-		PreviousWebhookTag: plan.PreviousWebhookTag,
-		TargetWebhookTag:   plan.TargetWebhookTag,
-		CommitSHA:          strings.TrimSpace(commitSHA),
-		CompletedAt:        completedAt,
+		Status:               strings.TrimSpace(status),
+		CoveragePolicy:       currentCoveragePolicy,
+		RunID:                strings.TrimSpace(runID),
+		RunURL:               strings.TrimSpace(runURL),
+		Workflow:             strings.TrimSpace(workflow),
+		Lane:                 lane.Name,
+		ReleaseLine:          plan.ReleaseLine,
+		TargetVersion:        plan.TargetVersion,
+		PreviousVersion:      plan.PreviousVersion,
+		InstallRancher:       lane.InstallRancher,
+		UpgradeToRancher:     lane.UpgradeToRancher,
+		WebhookChanged:       plan.WebhookChanged,
+		WebhookImage:         plan.WebhookImage,
+		WebhookOverride:      lane.WebhookOverrideImage,
+		PreviousWebhookBuild: plan.PreviousWebhookBuild,
+		PreviousWebhookTag:   plan.PreviousWebhookTag,
+		TargetWebhookBuild:   plan.TargetWebhookBuild,
+		TargetWebhookTag:     plan.TargetWebhookTag,
+		SigningPolicy:        plan.SigningPolicy,
+		SigningRegistry:      plan.SigningRegistry,
+		CommitSHA:            strings.TrimSpace(commitSHA),
+		CompletedAt:          completedAt,
 	}
 	if err := writeLedger(ledgerPath, l); err != nil {
 		fatalf("write ledger: %v", err)
@@ -155,13 +172,13 @@ func findLane(plan signoffPlan, laneName string) (signoffLane, error) {
 func readLedger(path string) (ledger, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return ledger{SchemaVersion: 1, Entries: map[string]map[string]entry{}}, nil
+		return ledger{SchemaVersion: ledgerSchemaVersion, Entries: map[string]map[string]entry{}}, nil
 	}
 	if err != nil {
 		return ledger{}, err
 	}
 	if strings.TrimSpace(string(data)) == "" {
-		return ledger{SchemaVersion: 1, Entries: map[string]map[string]entry{}}, nil
+		return ledger{SchemaVersion: ledgerSchemaVersion, Entries: map[string]map[string]entry{}}, nil
 	}
 	var l ledger
 	if err := json.Unmarshal(data, &l); err != nil {

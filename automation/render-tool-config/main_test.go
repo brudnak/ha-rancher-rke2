@@ -46,12 +46,12 @@ func TestRendererWritesConfigAndEnvOutput(t *testing.T) {
 	envPath := filepath.Join(tempDir, "lane.env")
 
 	planJSON := `{
+  "webhook_image": "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5",
   "lanes": [
     {
       "name": "fresh-alpha",
       "install_rancher": "v2.14.1-alpha6",
       "upgrade_to_rancher": "v2.14.1-alpha7",
-      "webhook_override_image": "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5",
       "terraform_state_key": "state/key.tfstate",
       "aws_prefix": "gha-23456789-fa"
     }
@@ -99,7 +99,7 @@ func TestRendererWritesConfigAndEnvOutput(t *testing.T) {
 	if err := os.WriteFile(cfg.OutputPath, []byte(renderToolConfig(cfg, lane)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env, err := renderEnvOutput(lane)
+	env, err := renderEnvOutput(plan, lane)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,14 +124,31 @@ func TestRendererWritesConfigAndEnvOutput(t *testing.T) {
 }
 
 func TestRenderEnvOutputRejectsNewlineInjection(t *testing.T) {
-	_, err := renderEnvOutput(signoffLane{
-		Name:                 "previous-with-candidate-webhook",
-		InstallRancher:       "v2.14.0",
-		WebhookOverrideImage: "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5\nRANCHER_ADMIN_TOKEN=oops",
-	})
+	_, err := renderEnvOutput(
+		signoffPlan{WebhookImage: "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5\nRANCHER_ADMIN_TOKEN=oops"},
+		signoffLane{
+			Name:           "fresh-alpha",
+			InstallRancher: "v2.14.1-alpha7",
+		},
+	)
 	if err == nil {
 		t.Fatal("expected newline injection to be rejected")
 	}
+}
+
+func TestRenderEnvOutputPrefersLaneWebhookOverride(t *testing.T) {
+	env, err := renderEnvOutput(
+		signoffPlan{WebhookImage: "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5"},
+		signoffLane{
+			Name:                 "previous-with-candidate-webhook",
+			InstallRancher:       "v2.14.0",
+			WebhookOverrideImage: "registry.rancher.com/rancher/rancher-webhook:v0.10.1-rc.5",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, env, "RANCHER_WEBHOOK_IMAGE=registry.rancher.com/rancher/rancher-webhook:v0.10.1-rc.5")
 }
 
 func assertContains(t *testing.T, haystack, needle string) {

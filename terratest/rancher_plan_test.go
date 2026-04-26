@@ -1,6 +1,8 @@
 package test
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -61,6 +63,103 @@ func TestShouldDropPrereleaseImageOverrides(t *testing.T) {
 
 	if !shouldDropPrereleaseImageOverrides("rancher-latest") {
 		t.Fatal("expected rancher-latest charts to rely on embedded prerelease image settings")
+	}
+}
+
+func TestChooseRancherSourceCandidatesAutoPrefersPrimeAndStagingBeforeCommunity(t *testing.T) {
+	candidates, _, _ := chooseRancherSourceCandidates("auto", "alpha")
+	want := []string{"rancher-prime", "optimus-rancher-alpha", "optimus-rancher-latest", "rancher-alpha", "rancher-latest"}
+	if strings.Join(candidates, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected %v, got %v", want, candidates)
+	}
+}
+
+func TestChooseRancherSourceCandidatesAutoReleasePrefersPrimeBeforeCommunity(t *testing.T) {
+	candidates, _, _ := chooseRancherSourceCandidates("auto", "release")
+	want := []string{"rancher-prime", "optimus-rancher-latest", "rancher-latest"}
+	if strings.Join(candidates, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected %v, got %v", want, candidates)
+	}
+}
+
+func TestRecordResolvedChartMatchPrefersExactTargetOverFallbackBaseline(t *testing.T) {
+	var best *resolvedChartMatch
+	recordResolvedChartMatch(&best, "rancher-prime", "2.14.0", "2.14.0", 1)
+	recordResolvedChartMatch(&best, "optimus-rancher-alpha", "2.14.1-alpha7", "2.14.0", 0)
+
+	if best == nil {
+		t.Fatal("expected a chart match")
+	}
+	if best.repoAlias != "optimus-rancher-alpha" || best.chartVersion != "2.14.1-alpha7" {
+		t.Fatalf("expected exact alpha chart to beat fallback baseline, got %#v", best)
+	}
+}
+
+func TestRecordResolvedChartMatchKeepsPrimeOnExactTie(t *testing.T) {
+	var best *resolvedChartMatch
+	recordResolvedChartMatch(&best, "rancher-prime", "2.14.1-alpha7", "2.14.0", 0)
+	recordResolvedChartMatch(&best, "rancher-alpha", "2.14.1-alpha7", "2.14.0", 0)
+
+	if best == nil {
+		t.Fatal("expected a chart match")
+	}
+	if best.repoAlias != "rancher-prime" {
+		t.Fatalf("expected first exact Prime match to win the tie, got %#v", best)
+	}
+}
+
+func TestResolveImageSettingsAllowsMixedReleaseAndAlphaSources(t *testing.T) {
+	releaseImage, releaseTag, releaseAgent, _ := resolveImageSettings("2.14.0", "release", "community")
+	if releaseImage != "" || releaseTag != "" || releaseAgent != "" {
+		t.Fatalf("expected community release to use chart defaults, got image=%q tag=%q agent=%q", releaseImage, releaseTag, releaseAgent)
+	}
+
+	alphaImage, alphaTag, alphaAgent, _ := resolveImageSettings("2.14.1-alpha7", "alpha", "community-staging")
+	if alphaImage != "stgregistry.suse.com/rancher/rancher" || alphaTag != "v2.14.1-alpha7" {
+		t.Fatalf("expected staging Rancher image for alpha, got image=%q tag=%q", alphaImage, alphaTag)
+	}
+	if alphaAgent != "stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha7" {
+		t.Fatalf("expected staging agent image for alpha, got %q", alphaAgent)
+	}
+}
+
+func TestValidateResolvedRancherImagesChecksExplicitRancherAndAgentImages(t *testing.T) {
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth":
+			_, _ = w.Write([]byte(`{"token":"test-token"}`))
+		case "/v2/rancher/rancher/manifests/v2.14.1-alpha7",
+			"/v2/rancher/rancher-agent/manifests/v2.14.1-alpha7":
+			if r.Header.Get("Authorization") != "Bearer test-token" {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="`+serverURL+`/auth",service="registry",scope="repository:rancher/rancher:pull"`)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			_, _ = w.Write([]byte("ok"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	serverURL = server.URL
+	t.Cleanup(server.Close)
+
+	previousClient := rancherRegistryHTTPClient
+	previousBases := rancherRegistryBaseURLs
+	rancherRegistryHTTPClient = server.Client()
+	rancherRegistryBaseURLs = map[string]string{"stgregistry.suse.com": server.URL}
+	t.Cleanup(func() {
+		rancherRegistryHTTPClient = previousClient
+		rancherRegistryBaseURLs = previousBases
+	})
+
+	err := validateResolvedRancherImages(
+		"stgregistry.suse.com/rancher/rancher",
+		"v2.14.1-alpha7",
+		"stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha7",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

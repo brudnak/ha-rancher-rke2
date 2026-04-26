@@ -60,8 +60,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  fresh-alpha:
-    name: ${{ inputs.lane }}
+  run-lane:
+    name: ${{ inputs.rancher_version }} / ${{ inputs.lane }}
     runs-on: ubuntu-latest
     environment: automation-smoke
     env:
@@ -222,7 +222,7 @@ jobs:
 
       - name: Wait for webhook chart rollout
         id: webhook_chart
-        if: ${{ (inputs.lane == 'upgrade-alpha' || inputs.lane == 'previous-with-candidate-webhook') && inputs.run_rancher_tests == true }}
+        if: ${{ inputs.lane == 'upgrade-alpha' && inputs.run_rancher_tests == true }}
         run: .github/scripts/run-with-cancel-cleanup.sh go test -v -run '^TestHAWaitWebhookChartVersion$' -timeout 20m ./terratest
 
       - name: Run Rancher tests
@@ -235,11 +235,11 @@ jobs:
 
           env_file="automation-output/downstream-ha-1.env"
           suites=("TestWebhookTestSuite")
+          version="${{ inputs.rancher_version }}"
+          version="${version#v}"
+          IFS='.' read -r rancher_major rancher_minor _ <<< "$version"
           if [ "${{ inputs.lane }}" = "fresh-alpha-local-suites" ]; then
             env_file="automation-output/local-suite-ha-1.env"
-            version="${{ inputs.rancher_version }}"
-            version="${version#v}"
-            IFS='.' read -r rancher_major rancher_minor _ <<< "$version"
             suites=(
               "TestConfigMapTestSuite"
               "TestSchemaChangesTestSuite"
@@ -250,9 +250,9 @@ jobs:
             else
               suites+=("TestVaiTestSuite/TestVaiEnabled")
             fi
-            if [ "$rancher_major" -gt 2 ] || { [ "$rancher_major" -eq 2 ] && [ "$rancher_minor" -ge 14 ]; }; then
-              suites+=("TestWebhookSecuritySettingsTestSuite")
-            fi
+          fi
+          if [ "${{ inputs.lane }}" != "fresh-alpha-local-suites" ] && { [ "$rancher_major" -gt 2 ] || { [ "$rancher_major" -eq 2 ] && [ "$rancher_minor" -ge 14 ]; }; }; then
+            suites+=("TestWebhookSecuritySettingsTestSuite")
           fi
           if [ ! -s "$env_file" ]; then
             echo "Expected suite env file $env_file"
@@ -346,6 +346,10 @@ jobs:
                 tags="validation,infra.any,cluster.any"
                 timeout_args=()
                 junit_name="TestWebhookTestSuite"
+                if [ "${{ inputs.lane }}" = "previous-with-candidate-webhook" ]; then
+                  test_run="TestWebhookTestSuite/TestWebhookChart/Verify_(webhook_pod_logs|the_count_of_webhook_is_greater_than_zero)"
+                  junit_name="TestWebhookTestSuite-WebhookOverride"
+                fi
                 ;;
               TestConfigMapTestSuite)
                 package="./validation/configmaps"
@@ -469,7 +473,7 @@ jobs:
             test-results/*.xml
 
       - name: Record successful sign-off lane
-        if: ${{ success() }}
+        if: ${{ success() && inputs.run_rancher_tests == true }}
         env:
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |

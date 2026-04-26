@@ -11,6 +11,7 @@ import (
 
 type signoffPlan struct {
 	TargetVersion string        `json:"target_version"`
+	WebhookImage  string        `json:"webhook_image"`
 	Lanes         []signoffLane `json:"lanes"`
 }
 
@@ -102,7 +103,7 @@ func main() {
 	}
 
 	if cfg.EnvOutputPath != "" {
-		env, err := renderEnvOutput(lane)
+		env, err := renderEnvOutput(plan, lane)
 		if err != nil {
 			fatalf("render env output: %v", err)
 		}
@@ -206,7 +207,7 @@ tf_vars:
 	)
 }
 
-func renderEnvOutput(lane signoffLane) (string, error) {
+func renderEnvOutput(plan signoffPlan, lane signoffLane) (string, error) {
 	var b strings.Builder
 	if err := writeGitHubEnvLine(&b, "TF_STATE_KEY", lane.TerraformStateKey); err != nil {
 		return "", err
@@ -217,7 +218,11 @@ func renderEnvOutput(lane signoffLane) (string, error) {
 	if err := writeGitHubEnvLine(&b, "RANCHER_UPGRADE_VERSION", lane.UpgradeToRancher); err != nil {
 		return "", err
 	}
-	if err := writeGitHubEnvLine(&b, "RANCHER_WEBHOOK_IMAGE", lane.WebhookOverrideImage); err != nil {
+	webhookImage := plan.WebhookImage
+	if lane.WebhookOverrideImage != "" {
+		webhookImage = lane.WebhookOverrideImage
+	}
+	if err := writeGitHubEnvLine(&b, "RANCHER_WEBHOOK_IMAGE", webhookImage); err != nil {
 		return "", err
 	}
 	return b.String(), nil

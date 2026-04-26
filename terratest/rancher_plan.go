@@ -24,6 +24,9 @@ const (
 	rancherHelmOperationUpgrade = "upgrade"
 )
 
+var rancherRegistryHTTPClient = http.DefaultClient
+var rancherRegistryBaseURLs = map[string]string{}
+
 func prepareRancherConfiguration(totalHAs int) ([]*RancherResolvedPlan, error) {
 	mode := strings.ToLower(strings.TrimSpace(viper.GetString("rancher.mode")))
 	switch mode {
@@ -142,6 +145,9 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 		if buildType == "release" && chartRepoAlias == "rancher-prime" {
 			rancherImage = "registry.rancher.com/rancher/rancher"
 			explanation = append(explanation, fmt.Sprintf("Using Prime chart and Prime Rancher image for released version %s", requestedVersion))
+		}
+		if err := validateResolvedRancherImages(rancherImage, rancherImageTag, agentImage); err != nil {
+			return nil, fmt.Errorf("validate Rancher image settings for %s: %w", requestedVersion, err)
 		}
 		explanation = append(explanation, imageExplanation...)
 		if compatibilityBaseline != requestedVersion {
@@ -325,13 +331,13 @@ func chooseRancherSourceCandidates(requestedDistro, buildType string) ([]string,
 	default:
 		switch buildType {
 		case "head":
-			return []string{"rancher-prime", "rancher-latest", "optimus-rancher-latest"}, "community-staging", []string{"Head build requested in auto mode, trying the latest released chart first and then falling back to community staging charts"}
+			return []string{"rancher-prime", "optimus-rancher-latest", "rancher-latest"}, "community-staging", []string{"Head build requested in auto mode, favoring Prime/staging chart sources before community charts"}
 		case "alpha":
-			return []string{"rancher-prime", "rancher-latest", "optimus-rancher-alpha", "optimus-rancher-latest", "rancher-alpha"}, "community-staging", []string{"Alpha build requested in auto mode, trying the latest released chart first and then community alpha/staging chart sources"}
+			return []string{"rancher-prime", "optimus-rancher-alpha", "optimus-rancher-latest", "rancher-alpha", "rancher-latest"}, "community-staging", []string{"Alpha build requested in auto mode, favoring Prime/staging chart sources before community charts"}
 		case "rc":
-			return []string{"rancher-prime", "rancher-latest", "optimus-rancher-latest"}, "community-staging", []string{"RC build requested in auto mode, trying the latest released chart first and then community staging chart sources"}
+			return []string{"rancher-prime", "optimus-rancher-latest", "rancher-latest"}, "community-staging", []string{"RC build requested in auto mode, favoring Prime/staging chart sources before community charts"}
 		default:
-			return []string{"rancher-latest", "rancher-prime"}, "community", []string{"Released build requested in auto mode, trying community release sources first"}
+			return []string{"rancher-prime", "optimus-rancher-latest", "rancher-latest"}, "community", []string{"Released build requested in auto mode, favoring Prime/staging chart sources before community charts"}
 		}
 	}
 }
@@ -631,6 +637,195 @@ func resolveImageSettings(requestedVersion, buildType, resolvedDistro string) (s
 
 func shouldDropPrereleaseImageOverrides(chartRepoAlias string) bool {
 	return !strings.HasPrefix(chartRepoAlias, "optimus-")
+}
+
+func validateResolvedRancherImages(rancherImage, rancherImageTag, agentImage string) error {
+	var images []string
+	if rancherImage != "" && rancherImageTag != "" {
+		images = append(images, rancherImage+":"+rancherImageTag)
+	}
+	if rancherImage == "" && rancherImageTag != "" {
+		images = append(images, "docker.io/rancher/rancher:"+rancherImageTag)
+	}
+	if agentImage != "" {
+		images = append(images, agentImage)
+	}
+
+	for _, image := range images {
+		registry, repository, tag, err := parseRegistryImage(image)
+		if err != nil {
+			return err
+		}
+		found, err := registryImageTagExists(registry, repository, tag)
+		if err != nil {
+			return fmt.Errorf("%s: %w", image, err)
+		}
+		if !found {
+			return fmt.Errorf("%s was not found in registry", image)
+		}
+	}
+	return nil
+}
+
+func registryImageTagExists(registry, repository, tag string) (bool, error) {
+	manifestURL := fmt.Sprintf("%s/v2/%s/manifests/%s", registryBaseURL(registry), repository, tag)
+	req, err := http.NewRequest(http.MethodHead, manifestURL, nil)
+	if err != nil {
+		return false, err
+	}
+	setRegistryManifestAcceptHeader(req)
+
+	resp, err := rancherRegistryHTTPClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	case http.StatusUnauthorized:
+		token, err := registryBearerToken(resp.Header.Get("WWW-Authenticate"))
+		if err != nil {
+			return false, err
+		}
+		return registryImageTagExistsWithToken(manifestURL, token)
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return false, fmt.Errorf("registry manifest lookup failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+}
+
+func registryImageTagExistsWithToken(manifestURL, token string) (bool, error) {
+	req, err := http.NewRequest(http.MethodHead, manifestURL, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	setRegistryManifestAcceptHeader(req)
+
+	resp, err := rancherRegistryHTTPClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return false, fmt.Errorf("registry authenticated manifest lookup failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+}
+
+func registryBearerToken(authenticate string) (string, error) {
+	params, err := parseRegistryBearerChallenge(authenticate)
+	if err != nil {
+		return "", err
+	}
+	realm := params["realm"]
+	if realm == "" {
+		return "", fmt.Errorf("registry Bearer challenge missing realm")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, realm, nil)
+	if err != nil {
+		return "", err
+	}
+	query := req.URL.Query()
+	if service := params["service"]; service != "" {
+		query.Set("service", service)
+	}
+	if scope := params["scope"]; scope != "" {
+		query.Set("scope", scope)
+	}
+	req.URL.RawQuery = query.Encode()
+
+	resp, err := rancherRegistryHTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("registry token request failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var tokenResponse struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResponse); err != nil {
+		return "", err
+	}
+	token := tokenResponse.Token
+	if token == "" {
+		token = tokenResponse.AccessToken
+	}
+	if token == "" {
+		return "", fmt.Errorf("registry token response did not include a token")
+	}
+	return token, nil
+}
+
+func parseRegistryBearerChallenge(value string) (map[string]string, error) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(strings.ToLower(value), "bearer ") {
+		return nil, fmt.Errorf("unsupported registry auth challenge %q", value)
+	}
+	value = strings.TrimSpace(value[len("Bearer "):])
+	params := map[string]string{}
+	for _, part := range strings.Split(value, ",") {
+		key, rawValue, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		params[strings.ToLower(strings.TrimSpace(key))] = strings.Trim(strings.TrimSpace(rawValue), `"`)
+	}
+	return params, nil
+}
+
+func setRegistryManifestAcceptHeader(req *http.Request) {
+	req.Header.Set("Accept", strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	}, ", "))
+}
+
+func parseRegistryImage(image string) (registry, repository, tag string, err error) {
+	image = strings.TrimSpace(image)
+	tagStart := strings.LastIndex(image, ":")
+	if tagStart < 0 || tagStart == len(image)-1 {
+		return "", "", "", fmt.Errorf("image must include a tag: %s", image)
+	}
+	slash := strings.Index(image, "/")
+	if slash < 0 || slash > tagStart {
+		return "", "", "", fmt.Errorf("image must include a registry and repository: %s", image)
+	}
+	registry = image[:slash]
+	repository = image[slash+1 : tagStart]
+	tag = image[tagStart+1:]
+	if registry == "" || repository == "" || tag == "" {
+		return "", "", "", fmt.Errorf("invalid image reference: %s", image)
+	}
+	return registry, repository, tag, nil
+}
+
+func registryBaseURL(registry string) string {
+	if base := rancherRegistryBaseURLs[registry]; base != "" {
+		return strings.TrimRight(base, "/")
+	}
+	if registry == "docker.io" {
+		return "https://registry-1.docker.io"
+	}
+	return "https://" + registry
 }
 
 func buildSupportMatrixURL(releasedVersion string) string {

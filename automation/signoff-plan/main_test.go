@@ -41,6 +41,7 @@ func TestResolveSigningPolicy(t *testing.T) {
 	}{
 		{name: "suse auto", input: "auto", registry: "registry.suse.com", want: "required"},
 		{name: "staging auto", input: "auto", registry: "stgregistry.suse.com", want: "required"},
+		{name: "prime auto", input: "auto", registry: "registry.rancher.com", want: "required"},
 		{name: "community auto", input: "auto", registry: "docker.io", want: "report-only"},
 		{name: "manual skip", input: "skip", registry: "stgregistry.suse.com", want: "skip"},
 	}
@@ -60,8 +61,9 @@ func TestResolveSigningPolicy(t *testing.T) {
 
 func TestBuildPlanAddsOldWebhookLaneWhenWebhookChanged(t *testing.T) {
 	client := fakeGitHubClient(t, map[string]string{
-		"/rancher/rancher/v2.14.1-alpha6/build.yaml": `webhookVersion: 109.0.1+up0.10.1-rc.5`,
-		"/rancher/rancher/v2.14.0/build.yaml":        `webhookVersion: 109.0.0+up0.10.0`,
+		"/rancher/rancher/v2.14.1-alpha6/build.yaml":             `webhookVersion: 109.0.1+up0.10.1-rc.5`,
+		"/rancher/rancher/v2.14.0/build.yaml":                    `webhookVersion: 109.0.0+up0.10.0`,
+		"/stg/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5": "ok",
 	})
 
 	plan, err := buildPlan(context.Background(), client, "v2.14.1-alpha6", "v2.14.0", "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5", "auto", "123456789", "ha-rancher-rke2/signoff")
@@ -98,10 +100,160 @@ func TestBuildPlanAddsOldWebhookLaneWhenWebhookChanged(t *testing.T) {
 	}
 }
 
-func TestBuildPlanSkipsOldWebhookLaneWhenWebhookUnchanged(t *testing.T) {
+func TestBuildPlanDiscoversStagingWebhookImageWhenNoOverride(t *testing.T) {
+	client := fakeGitHubClient(t, map[string]string{
+		"/rancher/rancher/v2.14.1-alpha6/build.yaml":                `webhookVersion: 109.0.1+up0.10.1-rc.5`,
+		"/rancher/rancher/v2.14.0/build.yaml":                       `webhookVersion: 109.0.0+up0.10.0`,
+		"/stg/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5":    "ok",
+		"/suse/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5":   "missing",
+		"/docker/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5": "ok",
+	})
+	client.registryBaseURLs = map[string]string{
+		"stgregistry.suse.com": client.rawBaseURL + "/stg",
+		"registry.rancher.com": client.rawBaseURL + "/prime",
+		"registry.suse.com":    client.rawBaseURL + "/suse",
+		"docker.io":            client.rawBaseURL + "/docker",
+	}
+
+	plan, err := buildPlan(context.Background(), client, "v2.14.1-alpha6", "v2.14.0", "", "auto", "", "ha-rancher-rke2/signoff")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantImage := "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5"
+	if plan.WebhookImage != wantImage {
+		t.Fatalf("expected %s, got %s", wantImage, plan.WebhookImage)
+	}
+	if plan.SigningPolicy != "required" {
+		t.Fatalf("expected required signing policy, got %s", plan.SigningPolicy)
+	}
+	if plan.Lanes[3].WebhookOverrideImage != wantImage {
+		t.Fatalf("expected old webhook lane to use %s, got %s", wantImage, plan.Lanes[3].WebhookOverrideImage)
+	}
+}
+
+func TestBuildPlanFallsBackToDockerHubWhenSUSERegistriesAreMissing(t *testing.T) {
+	client := fakeGitHubClient(t, map[string]string{
+		"/rancher/rancher/v2.14.1-alpha6/build.yaml":                `webhookVersion: 109.0.1+up0.10.1-rc.5`,
+		"/rancher/rancher/v2.14.0/build.yaml":                       `webhookVersion: 109.0.0+up0.10.0`,
+		"/docker/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5": "ok",
+	})
+	client.registryBaseURLs = map[string]string{
+		"stgregistry.suse.com": client.rawBaseURL + "/stg",
+		"registry.rancher.com": client.rawBaseURL + "/prime",
+		"registry.suse.com":    client.rawBaseURL + "/suse",
+		"docker.io":            client.rawBaseURL + "/docker",
+	}
+
+	plan, err := buildPlan(context.Background(), client, "v2.14.1-alpha6", "v2.14.0", "", "auto", "", "ha-rancher-rke2/signoff")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantImage := "docker.io/rancher/rancher-webhook:v0.10.1-rc.5"
+	if plan.WebhookImage != wantImage {
+		t.Fatalf("expected %s, got %s", wantImage, plan.WebhookImage)
+	}
+	if plan.SigningPolicy != "report-only" {
+		t.Fatalf("expected report-only signing policy, got %s", plan.SigningPolicy)
+	}
+}
+
+func TestBuildPlanFallsBackToPrimeBeforePublicSUSEAndDockerHub(t *testing.T) {
+	client := fakeGitHubClient(t, map[string]string{
+		"/rancher/rancher/v2.14.1-alpha6/build.yaml":                `webhookVersion: 109.0.1+up0.10.1-rc.5`,
+		"/rancher/rancher/v2.14.0/build.yaml":                       `webhookVersion: 109.0.0+up0.10.0`,
+		"/prime/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5":  "ok",
+		"/suse/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5":   "ok",
+		"/docker/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5": "ok",
+	})
+
+	plan, err := buildPlan(context.Background(), client, "v2.14.1-alpha6", "v2.14.0", "", "auto", "", "ha-rancher-rke2/signoff")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantImage := "registry.rancher.com/rancher/rancher-webhook:v0.10.1-rc.5"
+	if plan.WebhookImage != wantImage {
+		t.Fatalf("expected %s, got %s", wantImage, plan.WebhookImage)
+	}
+	if plan.SigningPolicy != "required" {
+		t.Fatalf("expected required signing policy, got %s", plan.SigningPolicy)
+	}
+}
+
+func TestBuildPlanFailsWhenExplicitWebhookImageTagMismatchesBuildYAML(t *testing.T) {
+	client := fakeGitHubClient(t, map[string]string{
+		"/rancher/rancher/v2.14.1-alpha6/build.yaml":             `webhookVersion: 109.0.1+up0.10.1-rc.5`,
+		"/rancher/rancher/v2.14.0/build.yaml":                    `webhookVersion: 109.0.0+up0.10.0`,
+		"/stg/v2/rancher/rancher-webhook/manifests/v0.10.0":      "ok",
+		"/stg/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5": "ok",
+	})
+
+	_, err := buildPlan(context.Background(), client, "v2.14.1-alpha6", "v2.14.0", "stgregistry.suse.com/rancher/rancher-webhook:v0.10.0", "auto", "", "ha-rancher-rke2/signoff")
+	if err == nil {
+		t.Fatal("expected explicit mismatched webhook image tag to fail")
+	}
+	if !strings.Contains(err.Error(), "expected v0.10.1-rc.5") {
+		t.Fatalf("expected tag mismatch error, got %v", err)
+	}
+}
+
+func TestBuildPlanFailsWhenExplicitWebhookImageIsMissing(t *testing.T) {
 	client := fakeGitHubClient(t, map[string]string{
 		"/rancher/rancher/v2.14.1-alpha6/build.yaml": `webhookVersion: 109.0.1+up0.10.1-rc.5`,
-		"/rancher/rancher/v2.14.0/build.yaml":        `webhookVersion: 109.0.1+up0.10.1-rc.5`,
+		"/rancher/rancher/v2.14.0/build.yaml":        `webhookVersion: 109.0.0+up0.10.0`,
+	})
+
+	_, err := buildPlan(context.Background(), client, "v2.14.1-alpha6", "v2.14.0", "stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5", "auto", "", "ha-rancher-rke2/signoff")
+	if err == nil {
+		t.Fatal("expected explicit missing webhook image to fail")
+	}
+	if !strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("expected missing image error, got %v", err)
+	}
+}
+
+func TestRegistryImageTagExistsHandlesBearerChallenge(t *testing.T) {
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/auth":
+			_, _ = w.Write([]byte(`{"token":"test-token"}`))
+		case r.URL.Path == "/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5":
+			if r.Header.Get("Authorization") != "Bearer test-token" {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="`+serverURL+`/auth",service="registry",scope="repository:rancher/rancher-webhook:pull"`)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			_, _ = w.Write([]byte("ok"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	serverURL = server.URL
+	t.Cleanup(server.Close)
+
+	client := githubClient{
+		httpClient: server.Client(),
+		registryBaseURLs: map[string]string{
+			"stgregistry.suse.com": server.URL,
+		},
+	}
+	found, err := client.registryImageTagExists(context.Background(), "stgregistry.suse.com", "rancher/rancher-webhook", "v0.10.1-rc.5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !found {
+		t.Fatal("expected tag to exist")
+	}
+}
+
+func TestBuildPlanSkipsOldWebhookLaneWhenWebhookUnchanged(t *testing.T) {
+	client := fakeGitHubClient(t, map[string]string{
+		"/rancher/rancher/v2.14.1-alpha6/build.yaml":                `webhookVersion: 109.0.1+up0.10.1-rc.5`,
+		"/rancher/rancher/v2.14.0/build.yaml":                       `webhookVersion: 109.0.1+up0.10.1-rc.5`,
+		"/docker/v2/rancher/rancher-webhook/manifests/v0.10.1-rc.5": "ok",
 	})
 
 	plan, err := buildPlan(context.Background(), client, "v2.14.1-alpha6", "v2.14.0", "", "auto", "", "ha-rancher-rke2/signoff")
@@ -166,9 +318,10 @@ func TestApplyLedgerSkipsSuccessfulLanes(t *testing.T) {
 	ledger := signoffLedger{Entries: map[string]map[string]ledgerEntry{
 		"v2.14.1-alpha7": {
 			laneFreshAlpha: {
-				Status:      "success",
-				RunID:       "123",
-				CompletedAt: "2026-04-25T00:00:00Z",
+				Status:         "success",
+				CoveragePolicy: currentCoveragePolicy,
+				RunID:          "123",
+				CompletedAt:    "2026-04-25T00:00:00Z",
 			},
 		},
 	}}
@@ -182,6 +335,33 @@ func TestApplyLedgerSkipsSuccessfulLanes(t *testing.T) {
 	}
 }
 
+func TestApplyLedgerDoesNotSkipStaleCoveragePolicy(t *testing.T) {
+	plan := plan{
+		TargetVersion: "v2.14.1-alpha7",
+		Lanes: []lane{
+			{Name: laneFreshAlpha},
+		},
+	}
+	ledger := signoffLedger{Entries: map[string]map[string]ledgerEntry{
+		"v2.14.1-alpha7": {
+			laneFreshAlpha: {
+				Status:         "success",
+				CoveragePolicy: "alpha-webhook-signoff-v1",
+				RunID:          "123",
+				CompletedAt:    "2026-04-25T00:00:00Z",
+			},
+		},
+	}}
+
+	got := applyLedgerSkips(plan, ledger)
+	if len(got.Lanes) != 1 || got.Lanes[0].Name != laneFreshAlpha {
+		t.Fatalf("expected stale coverage entry not to skip lane, got %#v", got.Lanes)
+	}
+	if len(got.SkippedLanes) != 0 {
+		t.Fatalf("expected no skipped lanes, got %#v", got.SkippedLanes)
+	}
+}
+
 func fakeGitHubClient(t *testing.T, responses map[string]string) githubClient {
 	t.Helper()
 
@@ -189,6 +369,10 @@ func fakeGitHubClient(t *testing.T, responses map[string]string) githubClient {
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		for suffix, body := range responses {
 			if strings.HasSuffix(path, strings.TrimPrefix(suffix, "/")) {
+				if body == "missing" {
+					http.NotFound(w, r)
+					return
+				}
 				_, _ = w.Write([]byte(body))
 				return
 			}
@@ -202,5 +386,11 @@ func fakeGitHubClient(t *testing.T, responses map[string]string) githubClient {
 		token:      "",
 		rawBaseURL: server.URL,
 		apiBaseURL: server.URL,
+		registryBaseURLs: map[string]string{
+			"stgregistry.suse.com": server.URL + "/stg",
+			"registry.rancher.com": server.URL + "/prime",
+			"registry.suse.com":    server.URL + "/suse",
+			"docker.io":            server.URL + "/docker",
+		},
 	}
 }

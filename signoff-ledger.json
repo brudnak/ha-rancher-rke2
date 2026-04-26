@@ -1,42 +1,4 @@
 {
-  "schema_version": 1,
-  "entries": {
-    "v2.14.1-alpha7": {
-      "fresh-alpha": {
-        "status": "success",
-        "run_id": "24942192231",
-        "run_url": "https://github.com/brudnak/ha-rancher-rke2/actions/runs/24942192231",
-        "workflow": "Run Alpha/Webhook Sign-Off",
-        "lane": "fresh-alpha",
-        "release_line": "v2.14",
-        "target_version": "v2.14.1-alpha7",
-        "previous_version": "v2.14.0",
-        "install_rancher": "v2.14.1-alpha7",
-        "webhook_changed": true,
-        "webhook_image": "docker.io/rancher/rancher-webhook:v0.10.1-rc.5",
-        "previous_webhook_tag": "v0.10.0",
-        "target_webhook_tag": "v0.10.1-rc.5",
-        "commit_sha": "5f233ed126d63c81a7eaa55490e8a2a66b3efdf8",
-        "completed_at": "2026-04-25T22:53:58Z"
-      },
-      "upgrade-alpha": {
-        "status": "success",
-        "run_id": "24944044437",
-        "run_url": "https://github.com/brudnak/ha-rancher-rke2/actions/runs/24944044437",
-        "workflow": "Run Alpha/Webhook Sign-Off",
-        "lane": "upgrade-alpha",
-        "release_line": "v2.14",
-        "target_version": "v2.14.1-alpha7",
-        "previous_version": "v2.14.0",
-        "install_rancher": "v2.14.0",
-        "upgrade_to_rancher": "v2.14.1-alpha7",
-        "webhook_changed": true,
-        "webhook_image": "docker.io/rancher/rancher-webhook:v0.10.1-rc.5",
-        "previous_webhook_tag": "v0.10.0",
-        "target_webhook_tag": "v0.10.1-rc.5",
-        "commit_sha": "c7e194bdc00ffe013d9b80f812a971b2c7ff3865",
-        "completed_at": "2026-04-26T00:48:53Z"
-      }
-    }
-  }
+  "schema_version": 2,
+  "entries": {}
 }

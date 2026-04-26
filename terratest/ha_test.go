@@ -39,6 +39,10 @@ func TestHaSetup(t *testing.T) {
 		t.Fatalf("Local tooling preflight failed before provisioning infrastructure: %v", err)
 	}
 
+	if err := validateWebhookImagePreflight(); err != nil {
+		t.Fatalf("Webhook image preflight failed before provisioning infrastructure: %v", err)
+	}
+
 	if err := validateSecretEnvironment(); err != nil {
 		t.Fatalf("Secret environment preflight failed before provisioning infrastructure: %v", err)
 	}
