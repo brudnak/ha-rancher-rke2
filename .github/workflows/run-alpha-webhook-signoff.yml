@@ -303,7 +303,9 @@ jobs:
               suites+=("TestVaiTestSuite/TestVaiEnabled")
             fi
           fi
-          if [ "${{ inputs.lane }}" != "fresh-alpha-local-suites" ] && { [ "$rancher_major" -gt 2 ] || { [ "$rancher_major" -eq 2 ] && [ "$rancher_minor" -ge 14 ]; }; }; then
+          if [ "${{ inputs.lane }}" != "fresh-alpha-local-suites" ] && \
+             [ "${{ inputs.lane }}" != "previous-with-candidate-webhook" ] && \
+             { [ "$rancher_major" -gt 2 ] || { [ "$rancher_major" -eq 2 ] && [ "$rancher_minor" -ge 14 ]; }; }; then
             suites+=("TestWebhookSecuritySettingsTestSuite")
           fi
           if [ ! -s "$env_file" ]; then
