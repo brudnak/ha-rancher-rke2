@@ -544,7 +544,9 @@ jobs:
             -run-url "$RUN_URL" \
             -workflow "${{ github.workflow }}" \
             -commit-sha "${{ github.sha }}" \
-            -signing-result automation-output/webhook-signing.json
+            -signing-result automation-output/webhook-signing.json \
+            -install-resolution automation-output/rancher-resolution-install-ha-1.json \
+            -upgrade-resolution automation-output/rancher-resolution-upgrade-ha-1.json
 
           git add signoff-ledger.json
           if git diff --cached --quiet; then

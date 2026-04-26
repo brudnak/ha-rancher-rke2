@@ -54,6 +54,11 @@ func TestHaSetup(t *testing.T) {
 	if err := confirmResolvedPlans(resolvedPlans); err != nil {
 		t.Fatalf("Canceled before provisioning infrastructure: %v", err)
 	}
+	for i, plan := range resolvedPlans {
+		if err := writeRancherResolutionArtifact("install", i+1, plan); err != nil {
+			t.Fatalf("Failed to write Rancher install resolution artifact: %v", err)
+		}
+	}
 
 	terraformOptions := getTerraformOptions(t, totalHAs)
 	terraform.InitAndApply(t, terraformOptions)

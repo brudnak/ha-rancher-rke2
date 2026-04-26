@@ -12,6 +12,7 @@ func TestLedgerRecordsSuccessfulLane(t *testing.T) {
 	planPath := filepath.Join(tempDir, "signoff-plan.json")
 	ledgerPath := filepath.Join(tempDir, "signoff-ledger.json")
 	signingPath := filepath.Join(tempDir, "webhook-signing.json")
+	installResolutionPath := filepath.Join(tempDir, "rancher-resolution-install-ha-1.json")
 	planJSON := `{
   "target_version": "v2.14.1-alpha7",
   "release_line": "v2.14",
@@ -52,6 +53,28 @@ func TestLedgerRecordsSuccessfulLane(t *testing.T) {
 	if err := os.WriteFile(signingPath, []byte(signingJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	installResolutionJSON := `{
+  "phase": "install",
+  "ha_index": 1,
+  "requested_version": "2.14.1-alpha7",
+  "requested_distro": "auto",
+  "build_type": "alpha",
+  "resolved_distro": "community-staging",
+  "chart_repo_alias": "optimus-rancher-alpha",
+  "chart_version": "2.14.1-alpha7",
+  "chart_source": "optimus-rancher-alpha/rancher@2.14.1-alpha7",
+  "rancher_image": "stgregistry.suse.com/rancher/rancher",
+  "rancher_image_tag": "v2.14.1-alpha7",
+  "agent_image": "stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha7",
+  "compatibility_baseline": "2.14.0",
+  "recommended_rke2_version": "v1.34.6+rke2r3",
+  "resolution_notes": [
+    "Using exact chart match optimus-rancher-alpha/rancher@2.14.1-alpha7"
+  ]
+}`
+	if err := os.WriteFile(installResolutionPath, []byte(installResolutionJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	plan, err := readPlan(planPath)
 	if err != nil {
@@ -66,6 +89,10 @@ func TestLedgerRecordsSuccessfulLane(t *testing.T) {
 		t.Fatal(err)
 	}
 	signingResult, err := readSigningResult(signingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installResolution, err := readRancherResolution(installResolutionPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +113,7 @@ func TestLedgerRecordsSuccessfulLane(t *testing.T) {
 			SigningPolicy:        plan.SigningPolicy,
 			SigningRegistry:      plan.SigningRegistry,
 			SigningVerification:  signingResult,
+			InstallResolution:    installResolution,
 			CompletedAt:          "2026-04-25T00:00:00Z",
 		},
 	}
@@ -116,6 +144,11 @@ func TestLedgerRecordsSuccessfulLane(t *testing.T) {
 		`"sbom_verified": true`,
 		`"https://sigstore.dev/cosign/sign/v1"`,
 		`"https://slsa.dev/provenance/v1"`,
+		`"rancher_install_resolution": {`,
+		`"chart_repo_alias": "optimus-rancher-alpha"`,
+		`"chart_version": "2.14.1-alpha7"`,
+		`"chart_source": "optimus-rancher-alpha/rancher@2.14.1-alpha7"`,
+		`"resolved_distro": "community-staging"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected ledger to contain %s:\n%s", want, got)
@@ -125,6 +158,16 @@ func TestLedgerRecordsSuccessfulLane(t *testing.T) {
 
 func TestReadSigningResultMissingPathIsOptional(t *testing.T) {
 	result, err := readSigningResult(filepath.Join(t.TempDir(), "missing.json"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected nil result, got %+v", result)
+	}
+}
+
+func TestReadRancherResolutionMissingPathIsOptional(t *testing.T) {
+	result, err := readRancherResolution(filepath.Join(t.TempDir(), "missing.json"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

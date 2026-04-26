@@ -42,6 +42,11 @@ func TestHAUpgradeRancher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to resolve Rancher upgrade plan for %s: %v", upgradeVersion, err)
 	}
+	for i, plan := range upgradePlans {
+		if err := writeRancherResolutionArtifact("upgrade", i+1, plan); err != nil {
+			t.Fatalf("failed to write Rancher upgrade resolution artifact: %v", err)
+		}
+	}
 
 	terraformOptions := getTerraformOptions(t, totalHAs)
 	outputs := getTerraformOutputs(t, terraformOptions)
