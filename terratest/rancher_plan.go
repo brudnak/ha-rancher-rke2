@@ -918,6 +918,7 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 	if operation == "" {
 		operation = rancherHelmOperationInstall
 	}
+	helmImages := normalizeHelmImageSettings(rancherImage, agentImage)
 
 	var baseSettings []string
 	switch operation {
@@ -944,9 +945,14 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 		"  --set agentTLSMode=system-store",
 	}...)
 
-	if rancherImage != "" {
+	if helmImages.systemDefaultRegistry != "" {
 		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
-			"  --set rancherImage=" + rancherImage + " \\",
+			"  --set systemDefaultRegistry=" + helmImages.systemDefaultRegistry + " \\",
+		}, baseSettings[len(baseSettings)-1:]...)...)
+	}
+	if helmImages.rancherImage != "" {
+		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
+			"  --set rancherImage=" + helmImages.rancherImage + " \\",
 		}, baseSettings[len(baseSettings)-1:]...)...)
 	}
 	if rancherImageTag != "" {
@@ -954,10 +960,10 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 			"  --set rancherImageTag=" + rancherImageTag + " \\",
 		}, baseSettings[len(baseSettings)-1:]...)...)
 	}
-	if agentImage != "" {
+	if helmImages.agentImage != "" {
 		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
 			"  --set 'extraEnv[0].name=CATTLE_AGENT_IMAGE' \\",
-			"  --set 'extraEnv[0].value=" + agentImage + "' \\",
+			"  --set 'extraEnv[0].value=" + helmImages.agentImage + "' \\",
 		}, baseSettings[len(baseSettings)-1:]...)...)
 	}
 
@@ -970,6 +976,47 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 	}
 
 	return strings.Join(baseSettings, "\n")
+}
+
+type helmImageSettings struct {
+	systemDefaultRegistry string
+	rancherImage          string
+	agentImage            string
+}
+
+func normalizeHelmImageSettings(rancherImage, agentImage string) helmImageSettings {
+	settings := helmImageSettings{
+		rancherImage: strings.TrimSpace(rancherImage),
+		agentImage:   strings.TrimSpace(agentImage),
+	}
+
+	rancherRegistry, rancherRepository, ok := splitRegistryRepository(settings.rancherImage)
+	if !ok {
+		return settings
+	}
+	agentRegistry, agentRepositoryTag, ok := splitRegistryRepository(settings.agentImage)
+	if settings.agentImage != "" && (!ok || agentRegistry != rancherRegistry) {
+		return settings
+	}
+
+	settings.systemDefaultRegistry = rancherRegistry
+	settings.rancherImage = rancherRepository
+	if settings.agentImage != "" {
+		settings.agentImage = agentRepositoryTag
+	}
+	return settings
+}
+
+func splitRegistryRepository(image string) (string, string, bool) {
+	image = strings.TrimSpace(image)
+	registry, repository, ok := strings.Cut(image, "/")
+	if !ok || registry == "" || repository == "" {
+		return "", "", false
+	}
+	if !strings.Contains(registry, ".") && !strings.Contains(registry, ":") && registry != "localhost" {
+		return "", "", false
+	}
+	return registry, repository, true
 }
 
 func fetchURLBody(url string) (string, error) {

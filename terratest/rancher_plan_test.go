@@ -182,10 +182,11 @@ func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T)
 	command := commands[0]
 	expectedSnippets := []string{
 		"--set tls=external",
-		"--set rancherImage=stgregistry.suse.com/rancher/rancher",
+		"--set systemDefaultRegistry=stgregistry.suse.com",
+		"--set rancherImage=rancher/rancher",
 		"--set rancherImageTag=v2.14.1-alpha3",
 		"--set 'extraEnv[0].name=CATTLE_AGENT_IMAGE'",
-		"--set 'extraEnv[0].value=stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha3'",
+		"--set 'extraEnv[0].value=rancher/rancher-agent:v2.14.1-alpha3'",
 	}
 
 	for _, snippet := range expectedSnippets {
@@ -243,10 +244,11 @@ func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
 		"--version 2.14.1-alpha6",
 		"--set hostname=placeholder",
 		"--set tls=external",
-		"--set rancherImage=stgregistry.suse.com/rancher/rancher",
+		"--set systemDefaultRegistry=stgregistry.suse.com",
+		"--set rancherImage=rancher/rancher",
 		"--set rancherImageTag=v2.14.1-alpha6",
 		"--set 'extraEnv[0].name=CATTLE_AGENT_IMAGE'",
-		"--set 'extraEnv[0].value=stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha6'",
+		"--set 'extraEnv[0].value=rancher/rancher-agent:v2.14.1-alpha6'",
 		"--wait",
 		"--wait-for-jobs",
 		"--timeout 30m",
@@ -259,6 +261,40 @@ func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
 	}
 	if strings.Contains(command, "ingress.tls.source=secret") {
 		t.Fatalf("expected external TLS termination, got:\n%s", command)
+	}
+}
+
+func TestNormalizeHelmImageSettingsUsesSystemDefaultRegistry(t *testing.T) {
+	settings := normalizeHelmImageSettings(
+		"stgregistry.suse.com/rancher/rancher",
+		"stgregistry.suse.com/rancher/rancher-agent:v2.13.5-alpha6",
+	)
+
+	if settings.systemDefaultRegistry != "stgregistry.suse.com" {
+		t.Fatalf("expected staging registry as system default, got %q", settings.systemDefaultRegistry)
+	}
+	if settings.rancherImage != "rancher/rancher" {
+		t.Fatalf("expected relative Rancher image, got %q", settings.rancherImage)
+	}
+	if settings.agentImage != "rancher/rancher-agent:v2.13.5-alpha6" {
+		t.Fatalf("expected relative agent image, got %q", settings.agentImage)
+	}
+}
+
+func TestNormalizeHelmImageSettingsKeepsMixedRegistriesQualified(t *testing.T) {
+	settings := normalizeHelmImageSettings(
+		"stgregistry.suse.com/rancher/rancher",
+		"registry.example.com/rancher/rancher-agent:v2.13.5-alpha6",
+	)
+
+	if settings.systemDefaultRegistry != "" {
+		t.Fatalf("expected no system default for mixed registries, got %q", settings.systemDefaultRegistry)
+	}
+	if settings.rancherImage != "stgregistry.suse.com/rancher/rancher" {
+		t.Fatalf("expected qualified Rancher image to be preserved, got %q", settings.rancherImage)
+	}
+	if settings.agentImage != "registry.example.com/rancher/rancher-agent:v2.13.5-alpha6" {
+		t.Fatalf("expected qualified agent image to be preserved, got %q", settings.agentImage)
 	}
 }
 
