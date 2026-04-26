@@ -1,6 +1,10 @@
 package test
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestSelectLocalWebhookDeploymentByImage(t *testing.T) {
 	data := []byte(`{
@@ -63,5 +67,35 @@ func TestSelectLocalWebhookDeploymentErrorsWhenMissing(t *testing.T) {
 	_, err := selectLocalWebhookDeployment([]byte(`{"items":[]}`))
 	if err == nil {
 		t.Fatal("expected missing webhook deployment error")
+	}
+}
+
+func TestExpectedWebhookChartVersionReadsEnvBeforePlan(t *testing.T) {
+	t.Setenv("RANCHER_WEBHOOK_CHART_VERSION", "109.0.1+up0.10.1-rc.5")
+
+	got, err := expectedWebhookChartVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "109.0.1+up0.10.1-rc.5" {
+		t.Fatalf("expectedWebhookChartVersion() = %q", got)
+	}
+}
+
+func TestExpectedWebhookChartVersionReadsWorkspacePlan(t *testing.T) {
+	t.Setenv("RANCHER_WEBHOOK_CHART_VERSION", "")
+	tempDir := t.TempDir()
+	t.Setenv("GITHUB_WORKSPACE", tempDir)
+	planPath := filepath.Join(tempDir, "signoff-plan.json")
+	if err := os.WriteFile(planPath, []byte(`{"target_webhook_build":"109.0.1+up0.10.1-rc.5"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := expectedWebhookChartVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "109.0.1+up0.10.1-rc.5" {
+		t.Fatalf("expectedWebhookChartVersion() = %q", got)
 	}
 }

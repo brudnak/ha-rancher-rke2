@@ -165,6 +165,7 @@ jobs:
           fi
 
           "$RUNNER_TEMP/signoff-plan" "${args[@]}"
+          echo "RANCHER_WEBHOOK_CHART_VERSION=$(jq -r '.target_webhook_build' signoff-plan.json)" >> "$GITHUB_ENV"
 
       - name: Render lane config
         run: |

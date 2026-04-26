@@ -255,9 +255,13 @@ func expectedWebhookChartVersion() (string, error) {
 		return version, nil
 	}
 
-	data, err := os.ReadFile("signoff-plan.json")
+	planPath, err := findSignoffPlanPath()
 	if err != nil {
-		return "", fmt.Errorf("failed to read signoff-plan.json for target webhook version: %w", err)
+		return "", err
+	}
+	data, err := os.ReadFile(planPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s for target webhook version: %w", planPath, err)
 	}
 	var plan struct {
 		TargetWebhookBuild string `json:"target_webhook_build"`
@@ -269,6 +273,26 @@ func expectedWebhookChartVersion() (string, error) {
 		return "", fmt.Errorf("signoff-plan.json target_webhook_build is empty")
 	}
 	return strings.TrimSpace(plan.TargetWebhookBuild), nil
+}
+
+func findSignoffPlanPath() (string, error) {
+	var candidates []string
+	if workspace := strings.TrimSpace(os.Getenv("GITHUB_WORKSPACE")); workspace != "" {
+		candidates = append(candidates, filepath.Join(workspace, "signoff-plan.json"))
+	}
+	candidates = append(candidates, "signoff-plan.json", "../signoff-plan.json")
+
+	var checked []string
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		checked = append(checked, candidate)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not find signoff-plan.json; checked %s", strings.Join(checked, ", "))
 }
 
 func waitForWebhookChartVersion(instanceNum int, scope, clusterName, kubeconfigPath, expectedVersion string, timeout, interval, settleDelay time.Duration) error {
