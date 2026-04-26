@@ -59,6 +59,14 @@ type provisioningClusterStatus struct {
 	} `json:"status"`
 }
 
+type podList struct {
+	Items []struct {
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+	} `json:"items"`
+}
+
 func TestHAProvisionLinodeDownstream(t *testing.T) {
 	requireExplicitLifecycleTest(t, "TestHAProvisionLinodeDownstream")
 	setupConfig(t)
@@ -84,9 +92,7 @@ func TestHAProvisionLinodeDownstream(t *testing.T) {
 		runID = strings.TrimSpace(os.Getenv("SIGNOFF_RUN_ID"))
 	}
 	namePrefix := strings.TrimSpace(os.Getenv("LINODE_CLUSTER_PREFIX"))
-	if namePrefix == "" {
-		namePrefix = "ha-rancher-rke2"
-	}
+	namePrefix = downstreamClusterNamePrefix(namePrefix, runID)
 
 	timeout := durationFromEnv("LINODE_DOWNSTREAM_TIMEOUT", 15*time.Minute)
 	var wg sync.WaitGroup
@@ -770,7 +776,7 @@ func waitForProvisioningClusterActive(kubeconfigPath, namespace, clusterName str
 			summary := summarizeProvisioningClusterStatus(status)
 			log.Printf("[downstream] Cluster %s attempt %d after %s: %s", clusterName, attempt, time.Since(start).Round(time.Second), summary)
 			if attempt == 1 || attempt%6 == 0 {
-				logDownstreamProvisioningDiagnostics(kubeconfigPath, namespace, strings.TrimSpace(status.Status.ClusterName))
+				logDownstreamProvisioningDiagnostics(kubeconfigPath, namespace, clusterName, strings.TrimSpace(status.Status.ClusterName))
 			}
 			if strings.EqualFold(status.Status.Phase, "Active") || status.Status.Ready {
 				return nil
@@ -782,19 +788,23 @@ func waitForProvisioningClusterActive(kubeconfigPath, namespace, clusterName str
 	return fmt.Errorf("timed out after %s waiting for downstream cluster %s to become active", timeout, clusterName)
 }
 
-func logDownstreamProvisioningDiagnostics(kubeconfigPath, namespace, managementClusterID string) {
+func logDownstreamProvisioningDiagnostics(kubeconfigPath, namespace, clusterName, managementClusterID string) {
 	commands := [][]string{
+		{"describe", "clusters.provisioning.cattle.io", clusterName, "-n", namespace},
 		{"get", "linodeconfigs.rke-machine-config.cattle.io", "-n", namespace, "-o", "wide"},
 		{"get", "clusters.cluster.x-k8s.io", "-A", "-o", "wide"},
+		{"describe", "clusters.cluster.x-k8s.io", clusterName, "-n", namespace},
 		{"get", "machinedeployments.cluster.x-k8s.io", "-A", "-o", "wide"},
 		{"get", "machinesets.cluster.x-k8s.io", "-A", "-o", "wide"},
 		{"get", "machines.cluster.x-k8s.io", "-A", "-o", "wide"},
+		{"get", "machines.cluster.x-k8s.io", "-A", "-l", "cluster.x-k8s.io/cluster-name=" + clusterName, "-o", "yaml"},
+		{"get", "jobs", "-n", namespace, "-o", "wide"},
+		{"get", "pods", "-n", namespace, "-o", "wide"},
 		{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"},
 	}
 	if managementClusterID != "" {
 		commands = append(commands,
-			[]string{"describe", "clusters.cluster.x-k8s.io", managementClusterID, "-n", namespace},
-			[]string{"get", "machines.cluster.x-k8s.io", "-A", "-l", "cluster.x-k8s.io/cluster-name=" + managementClusterID, "-o", "yaml"},
+			[]string{"get", "clusters.management.cattle.io", managementClusterID, "-o", "yaml"},
 		)
 	}
 
@@ -807,6 +817,49 @@ func logDownstreamProvisioningDiagnostics(kubeconfigPath, namespace, managementC
 		}
 		log.Printf("[downstream][diagnostics][%s]\n%s", label, trimDiagnosticOutput(output))
 	}
+	logDownstreamMachinePodDiagnostics(kubeconfigPath, namespace, clusterName)
+}
+
+func logDownstreamMachinePodDiagnostics(kubeconfigPath, namespace, clusterName string) {
+	output, err := runKubectlOutput(kubeconfigPath, "get", "pods", "-n", namespace, "-o", "json")
+	if err != nil {
+		log.Printf("[downstream][diagnostics][get pods -n %s -o json] %v", namespace, err)
+		return
+	}
+
+	var pods podList
+	if err := json.Unmarshal([]byte(output), &pods); err != nil {
+		log.Printf("[downstream][diagnostics][get pods -n %s -o json] parse failed: %v", namespace, err)
+		return
+	}
+
+	logged := 0
+	for _, pod := range pods.Items {
+		podName := strings.TrimSpace(pod.Metadata.Name)
+		if podName == "" || !strings.Contains(podName, clusterName) {
+			continue
+		}
+		logged++
+		logDownstreamDiagnosticCommand(kubeconfigPath, "describe", "pod", podName, "-n", namespace)
+		logDownstreamDiagnosticCommand(kubeconfigPath, "logs", podName, "-n", namespace, "--all-containers=true", "--tail=200")
+		if logged >= 5 {
+			log.Printf("[downstream][diagnostics] skipping remaining machine pod logs after %d pods", logged)
+			return
+		}
+	}
+	if logged == 0 {
+		log.Printf("[downstream][diagnostics] no machine pods matched cluster %s in namespace %s", clusterName, namespace)
+	}
+}
+
+func logDownstreamDiagnosticCommand(kubeconfigPath string, args ...string) {
+	output, err := runKubectlOutput(kubeconfigPath, args...)
+	label := strings.Join(args, " ")
+	if err != nil {
+		log.Printf("[downstream][diagnostics][%s] %v", label, err)
+		return
+	}
+	log.Printf("[downstream][diagnostics][%s]\n%s", label, trimDiagnosticOutput(output))
 }
 
 func trimDiagnosticOutput(output string) string {
@@ -980,4 +1033,14 @@ func shortRunID(runID string) string {
 		return runID
 	}
 	return runID[len(runID)-8:]
+}
+
+func downstreamClusterNamePrefix(explicitPrefix, runID string) string {
+	if explicitPrefix = strings.TrimSpace(explicitPrefix); explicitPrefix != "" {
+		return explicitPrefix
+	}
+	if strings.TrimSpace(runID) != "" {
+		return "gha"
+	}
+	return "ha-rancher-rke2"
 }

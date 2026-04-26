@@ -180,6 +180,27 @@ func TestShortRunID(t *testing.T) {
 	}
 }
 
+func TestDownstreamClusterNamePrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		explicit string
+		runID    string
+		want     string
+	}{
+		{name: "explicit", explicit: "custom", runID: "1234567890", want: "custom"},
+		{name: "github", runID: "1234567890", want: "gha"},
+		{name: "local", want: "ha-rancher-rke2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := downstreamClusterNamePrefix(tt.explicit, tt.runID); got != tt.want {
+				t.Fatalf("downstreamClusterNamePrefix() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSummarizeProvisioningClusterStatus(t *testing.T) {
 	status := provisioningClusterStatus{}
 	status.Status.Phase = "Updating"
