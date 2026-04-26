@@ -103,17 +103,66 @@ func TestNormalizeK3SVersion(t *testing.T) {
 func TestSelectLatestK3SReleaseVersion(t *testing.T) {
 	releases := []k3sRelease{
 		{Version: "v1.35.3+k3s1"},
-		{Version: "v1.33.8+k3s1", ServerArgs: map[string]interface{}{}, AgentArgs: map[string]interface{}{}},
-		{Version: "v1.34.6+k3s1", ServerArgs: map[string]interface{}{}, AgentArgs: map[string]interface{}{}},
-		{Version: "v1.35.2+k3s1", ServerArgs: map[string]interface{}{}, AgentArgs: map[string]interface{}{}},
+		{
+			Version:                 "v1.33.8+k3s1",
+			MinChannelServerVersion: "v2.12.0-alpha1",
+			MaxChannelServerVersion: "v2.14.99",
+			ServerArgs:              map[string]interface{}{},
+			AgentArgs:               map[string]interface{}{},
+		},
+		{
+			Version:                 "v1.34.6+k3s1",
+			MinChannelServerVersion: "v2.13.0-alpha1",
+			MaxChannelServerVersion: "v2.15.99",
+			ServerArgs:              map[string]interface{}{},
+			AgentArgs:               map[string]interface{}{},
+		},
+		{
+			Version:                 "v1.35.2+k3s1",
+			MinChannelServerVersion: "v2.14.0-alpha1",
+			MaxChannelServerVersion: "v2.15.99",
+			ServerArgs:              map[string]interface{}{},
+			AgentArgs:               map[string]interface{}{},
+		},
+		{
+			Version:                 "v1.36.0+k3s1",
+			MinChannelServerVersion: "v2.16.0-alpha1",
+			MaxChannelServerVersion: "v2.16.99",
+			ServerArgs:              map[string]interface{}{},
+			AgentArgs:               map[string]interface{}{},
+		},
 	}
 
-	got, err := selectLatestK3SReleaseVersion(releases)
+	got, err := selectLatestK3SReleaseVersion(releases, "v2.15.0-alpha3")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != "v1.35.2+k3s1" {
 		t.Fatalf("selectLatestK3SReleaseVersion() = %q, want %q", got, "v1.35.2+k3s1")
+	}
+
+	got, err = selectLatestK3SReleaseVersion(releases, "v2.13.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "v1.34.6+k3s1" {
+		t.Fatalf("selectLatestK3SReleaseVersion() = %q, want %q", got, "v1.34.6+k3s1")
+	}
+}
+
+func TestSelectLatestK3SReleaseVersionRequiresCompatibleRange(t *testing.T) {
+	releases := []k3sRelease{
+		{
+			Version:                 "v1.35.2+k3s1",
+			MinChannelServerVersion: "v2.14.0-alpha1",
+			MaxChannelServerVersion: "v2.15.99",
+			ServerArgs:              map[string]interface{}{},
+			AgentArgs:               map[string]interface{}{},
+		},
+	}
+
+	if _, err := selectLatestK3SReleaseVersion(releases, "v2.13.5"); err == nil {
+		t.Fatal("expected incompatible K3s release to be rejected")
 	}
 }
 

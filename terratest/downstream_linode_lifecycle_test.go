@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -372,18 +373,19 @@ func waitForProvisioningClusterDeleted(kubeconfigPath, namespace, clusterName st
 
 func resolveK3SDefaultVersion(rancherURL, bearerToken string) (string, error) {
 	if explicit := strings.TrimSpace(os.Getenv("K3S_VERSION")); explicit != "" {
-		return normalizeK3SVersion(explicit), nil
+		version := normalizeK3SVersion(explicit)
+		log.Printf("[downstream] Using explicit K3s version %s", version)
+		return version, nil
 	}
 
-	version, err := latestK3SReleaseVersionFromRancher(rancherURL, bearerToken)
+	version, err := latestK3SReleaseVersionFromRancherMetadata(rancherURL, bearerToken)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to resolve provisionable K3s version: %w", err)
 	}
-	log.Printf("[downstream] Selected K3s version %s from Rancher KDM release list", version)
 	return version, nil
 }
 
-func latestK3SReleaseVersionFromRancher(rancherURL, bearerToken string) (string, error) {
+func latestK3SReleaseVersionFromRancherMetadata(rancherURL, bearerToken string) (string, error) {
 	rancherURL = strings.TrimRight(clickableURL(rancherURL), "/")
 	if strings.TrimSpace(bearerToken) == "" {
 		return "", fmt.Errorf("bearer token must not be empty")
@@ -396,23 +398,111 @@ func latestK3SReleaseVersionFromRancher(rancherURL, bearerToken string) (string,
 		},
 	}
 
-	var out struct {
-		Data []k3sRelease `json:"data"`
+	releases, err := k3sReleasesFromRancherMetadataConfig(client, rancherURL, bearerToken)
+	if err != nil {
+		return "", err
 	}
-	apiURL := rancherURL + "/v1-k3s-release/releases"
-	if err := getRancherJSON(client, apiURL, bearerToken, &out); err != nil {
-		return "", fmt.Errorf("failed to read Rancher K3s release list: %w", err)
+	serverVersion, err := rancherServerVersion(client, rancherURL, bearerToken)
+	if err != nil {
+		return "", err
 	}
-	return selectLatestK3SReleaseVersion(out.Data)
+	version, err := selectLatestK3SReleaseVersion(releases, serverVersion)
+	if err != nil {
+		return "", err
+	}
+	log.Printf("[downstream] Selected K3s version %s for Rancher server version %s", version, serverVersion)
+	return version, nil
+}
+
+func k3sReleasesFromRancherMetadataConfig(client *http.Client, rancherURL, bearerToken string) ([]k3sRelease, error) {
+	var setting struct {
+		Value   string `json:"value"`
+		Default string `json:"default"`
+	}
+	if err := getRancherJSON(client, rancherURL+"/v3/settings/rke-metadata-config", bearerToken, &setting); err != nil {
+		return nil, fmt.Errorf("failed to read rke-metadata-config setting: %w", err)
+	}
+
+	metadataConfig := strings.TrimSpace(setting.Value)
+	if metadataConfig == "" {
+		metadataConfig = strings.TrimSpace(setting.Default)
+	}
+	if metadataConfig == "" {
+		return nil, fmt.Errorf("rke-metadata-config setting was empty")
+	}
+
+	var config struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(metadataConfig), &config); err != nil {
+		return nil, fmt.Errorf("failed to parse rke-metadata-config setting: %w", err)
+	}
+	if strings.TrimSpace(config.URL) == "" {
+		return nil, fmt.Errorf("rke-metadata-config did not include a url")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, config.URL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch KDM metadata %s: %w", config.URL, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("KDM metadata %s returned HTTP %d: %s", config.URL, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var metadata struct {
+		K3S struct {
+			Releases []k3sRelease `json:"releases"`
+		} `json:"k3s"`
+	}
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		return nil, fmt.Errorf("failed to parse KDM metadata %s: %w", config.URL, err)
+	}
+	return metadata.K3S.Releases, nil
+}
+
+func rancherServerVersion(client *http.Client, rancherURL, bearerToken string) (string, error) {
+	var setting struct {
+		Value   string `json:"value"`
+		Default string `json:"default"`
+	}
+	if err := getRancherJSON(client, rancherURL+"/v3/settings/server-version", bearerToken, &setting); err != nil {
+		return "", fmt.Errorf("failed to read server-version setting: %w", err)
+	}
+
+	version := strings.TrimSpace(setting.Value)
+	if version == "" {
+		version = strings.TrimSpace(setting.Default)
+	}
+	if version == "" {
+		return "", fmt.Errorf("server-version setting was empty")
+	}
+	return normalizeVersion(version), nil
 }
 
 type k3sRelease struct {
-	Version    string                 `json:"version"`
-	ServerArgs map[string]interface{} `json:"serverArgs"`
-	AgentArgs  map[string]interface{} `json:"agentArgs"`
+	Version                 string                 `json:"version"`
+	MinChannelServerVersion string                 `json:"minChannelServerVersion"`
+	MaxChannelServerVersion string                 `json:"maxChannelServerVersion"`
+	ServerArgs              map[string]interface{} `json:"serverArgs"`
+	AgentArgs               map[string]interface{} `json:"agentArgs"`
 }
 
-func selectLatestK3SReleaseVersion(releases []k3sRelease) (string, error) {
+func selectLatestK3SReleaseVersion(releases []k3sRelease, rancherVersion string) (string, error) {
+	serverVersion, err := parseRancherVersion(rancherVersion)
+	if err != nil {
+		return "", err
+	}
+
 	var selectedVersion *goversion.Version
 	selectedOriginal := ""
 
@@ -421,7 +511,10 @@ func selectLatestK3SReleaseVersion(releases []k3sRelease) (string, error) {
 		if version == "" || release.ServerArgs == nil || release.AgentArgs == nil {
 			continue
 		}
-		parsed, err := goversion.NewVersion(strings.TrimPrefix(version, "v"))
+		if !k3sReleaseSupportsRancherVersion(release, serverVersion) {
+			continue
+		}
+		parsed, err := parseRancherVersion(version)
 		if err != nil {
 			continue
 		}
@@ -432,12 +525,40 @@ func selectLatestK3SReleaseVersion(releases []k3sRelease) (string, error) {
 	}
 
 	if selectedOriginal == "" {
-		return "", fmt.Errorf("Rancher K3s release list did not contain any provisionable versions")
+		return "", fmt.Errorf("Rancher K3s release list did not contain any provisionable versions for Rancher %s", rancherVersion)
 	}
 	return selectedOriginal, nil
 }
 
+func k3sReleaseSupportsRancherVersion(release k3sRelease, serverVersion *goversion.Version) bool {
+	minVersion, err := parseRancherVersion(release.MinChannelServerVersion)
+	if err != nil {
+		return false
+	}
+	maxVersion, err := parseRancherVersion(release.MaxChannelServerVersion)
+	if err != nil {
+		return false
+	}
+	return !serverVersion.LessThan(minVersion) && !maxVersion.LessThan(serverVersion)
+}
+
+func parseRancherVersion(version string) (*goversion.Version, error) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return nil, fmt.Errorf("version must not be empty")
+	}
+	parsed, err := goversion.NewVersion(strings.TrimPrefix(version, "v"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse version %q: %w", version, err)
+	}
+	return parsed, nil
+}
+
 func normalizeK3SVersion(version string) string {
+	return normalizeVersion(version)
+}
+
+func normalizeVersion(version string) string {
 	version = strings.TrimSpace(version)
 	if version == "" || strings.HasPrefix(version, "v") {
 		return version
