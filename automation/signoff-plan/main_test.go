@@ -307,6 +307,60 @@ func TestLatestAlphasPerLineReturnsNewestRecentAlphaPerLine(t *testing.T) {
 	}
 }
 
+func TestTargetIgnoreListSkipsReleaseLine(t *testing.T) {
+	ignoreList := normalizeTargetIgnoreList(targetIgnoreList{
+		ReleaseLines: map[string]string{
+			"2.15": "known-bad line",
+		},
+	})
+
+	reason, ignored := ignoreList.reasonFor("v2.15.0-alpha3")
+	if !ignored {
+		t.Fatal("expected v2.15 alpha to be ignored")
+	}
+	if reason != "known-bad line" {
+		t.Fatalf("unexpected ignore reason: %s", reason)
+	}
+}
+
+func TestTargetIgnoreListExactVersionOverridesReleaseLine(t *testing.T) {
+	ignoreList := normalizeTargetIgnoreList(targetIgnoreList{
+		ReleaseLines: map[string]string{
+			"v2.15": "known-bad line",
+		},
+		Versions: map[string]string{
+			"2.15.0-alpha3": "specific broken alpha",
+		},
+	})
+
+	reason, ignored := ignoreList.reasonFor("v2.15.0-alpha3")
+	if !ignored {
+		t.Fatal("expected v2.15.0-alpha3 to be ignored")
+	}
+	if reason != "specific broken alpha" {
+		t.Fatalf("expected exact version reason, got %s", reason)
+	}
+}
+
+func TestIgnoredPlanHasNoRunnableLanes(t *testing.T) {
+	plan, err := ignoredPlan("v2.15.0-alpha3", "known-bad line", "123456789", "root")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.Ignored {
+		t.Fatal("expected plan to be marked ignored")
+	}
+	if plan.TargetVersion != "v2.15.0-alpha3" || plan.ReleaseLine != "v2.15" {
+		t.Fatalf("unexpected target metadata: %#v", plan)
+	}
+	if len(plan.Lanes) != 0 {
+		t.Fatalf("expected no runnable lanes, got %#v", plan.Lanes)
+	}
+	if len(plan.SkippedLanes) != 4 {
+		t.Fatalf("expected skipped lane records for all lane types, got %#v", plan.SkippedLanes)
+	}
+}
+
 func TestApplyLedgerSkipsSuccessfulLanes(t *testing.T) {
 	plan := plan{
 		TargetVersion: "v2.14.1-alpha7",

@@ -48,21 +48,25 @@ func TestFindLatestMinorReleaseErrorsWithoutGA(t *testing.T) {
 	}
 }
 
-func TestShouldDropPrereleaseImageOverrides(t *testing.T) {
-	if shouldDropPrereleaseImageOverrides("optimus-rancher-alpha") {
-		t.Fatal("expected optimus alpha charts to keep explicit staging image overrides")
+func TestPrereleaseChartClassification(t *testing.T) {
+	if !isExactStagingPrereleaseChart("optimus-rancher-alpha") {
+		t.Fatal("expected optimus alpha charts to be staging prerelease charts")
 	}
 
-	if shouldDropPrereleaseImageOverrides("optimus-rancher-latest") {
-		t.Fatal("expected optimus latest charts to keep explicit staging image overrides")
+	if !isExactStagingPrereleaseChart("optimus-rancher-latest") {
+		t.Fatal("expected optimus latest charts to be staging prerelease charts")
 	}
 
-	if !shouldDropPrereleaseImageOverrides("rancher-alpha") {
-		t.Fatal("expected rancher-alpha charts to rely on embedded prerelease image settings")
+	if !isExactCommunityPrereleaseChart("rancher-alpha") {
+		t.Fatal("expected rancher-alpha charts to be community prerelease charts")
 	}
 
-	if !shouldDropPrereleaseImageOverrides("rancher-latest") {
-		t.Fatal("expected rancher-latest charts to rely on embedded prerelease image settings")
+	if !isExactCommunityPrereleaseChart("rancher-latest") {
+		t.Fatal("expected rancher-latest charts to be community prerelease charts")
+	}
+
+	if isExactCommunityPrereleaseChart("rancher-prime") || isExactStagingPrereleaseChart("rancher-prime") {
+		t.Fatal("expected rancher-prime to use embedded Prime chart image settings")
 	}
 }
 
@@ -191,6 +195,34 @@ func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T)
 	}
 	if strings.Contains(command, "ingress.tls.source=secret") {
 		t.Fatalf("expected external TLS termination, got:\n%s", command)
+	}
+}
+
+func TestBuildAutoHelmCommandsCanUseCommunityAlphaImageFallback(t *testing.T) {
+	commands := buildAutoHelmCommands(
+		1,
+		rancherHelmOperationInstall,
+		"rancher-alpha",
+		"2.15.0-alpha3",
+		"admin",
+		"",
+		"v2.15.0-alpha3",
+		"",
+	)
+
+	command := commands[0]
+	expectedSnippets := []string{
+		"helm install rancher rancher-alpha/rancher",
+		"--set rancherImageTag=v2.15.0-alpha3",
+	}
+
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(command, snippet) {
+			t.Fatalf("expected helm command to contain %q, got:\n%s", snippet, command)
+		}
+	}
+	if strings.Contains(command, "stgregistry.suse.com") || strings.Contains(command, "CATTLE_AGENT_IMAGE") {
+		t.Fatalf("expected community fallback command not to include staging overrides, got:\n%s", command)
 	}
 }
 

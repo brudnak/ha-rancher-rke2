@@ -54,6 +54,8 @@ type plan struct {
 	SigningRegistry      string        `json:"signing_registry"`
 	RunID                string        `json:"run_id,omitempty"`
 	StateKeyRoot         string        `json:"state_key_root,omitempty"`
+	Ignored              bool          `json:"ignored,omitempty"`
+	IgnoreReason         string        `json:"ignore_reason,omitempty"`
 	Lanes                []lane        `json:"lanes"`
 	SkippedLanes         []skippedLane `json:"skipped_lanes,omitempty"`
 	GeneratedAt          string        `json:"generated_at"`
@@ -84,6 +86,11 @@ type skippedLane struct {
 
 type signoffLedger struct {
 	Entries map[string]map[string]ledgerEntry `json:"entries"`
+}
+
+type targetIgnoreList struct {
+	Versions     map[string]string `json:"versions"`
+	ReleaseLines map[string]string `json:"release_lines"`
 }
 
 type ledgerEntry struct {
@@ -124,6 +131,7 @@ func main() {
 	var runID string
 	var stateKeyRoot string
 	var ledgerPath string
+	var ignoreListPath string
 	var latestAlpha bool
 	var latestAlphaPerLine bool
 	var ignoreLedger bool
@@ -137,6 +145,7 @@ func main() {
 	flag.StringVar(&runID, "run-id", os.Getenv("GITHUB_RUN_ID"), "workflow run id used to generate per-lane Terraform state keys")
 	flag.StringVar(&stateKeyRoot, "state-key-root", "ha-rancher-rke2/signoff", "root prefix for generated Terraform state keys")
 	flag.StringVar(&ledgerPath, "ledger", "signoff-ledger.json", "sign-off ledger path used to skip already successful lanes")
+	flag.StringVar(&ignoreListPath, "ignore-list", "signoff-ignore.json", "target ignore list path used to skip known-bad versions or release lines")
 	flag.BoolVar(&latestAlpha, "latest-alpha", false, "resolve the latest Rancher alpha from GitHub releases")
 	flag.BoolVar(&latestAlphaPerLine, "latest-alpha-per-line", false, "resolve the latest Rancher alpha per vX.Y release line from GitHub releases")
 	flag.BoolVar(&ignoreLedger, "ignore-ledger", false, "ignore sign-off ledger entries when rendering lanes")
@@ -156,6 +165,10 @@ func main() {
 	if err != nil {
 		fatalf("read ledger: %v", err)
 	}
+	ignoreList, err := readTargetIgnoreList(ignoreListPath)
+	if err != nil {
+		fatalf("read ignore list: %v", err)
+	}
 
 	if latestAlpha && latestAlphaPerLine {
 		fatalf("set only one of -latest-alpha or -latest-alpha-per-line")
@@ -168,6 +181,14 @@ func main() {
 		}
 		plans := make([]plan, 0, len(targets))
 		for _, version := range targets {
+			if reason, ignored := ignoreList.reasonFor(version); ignored {
+				p, err := ignoredPlan(version, reason, runID, stateKeyRoot)
+				if err != nil {
+					fatalf("build ignored sign-off plan for %s: %v", version, err)
+				}
+				plans = append(plans, p)
+				continue
+			}
 			p, err := buildPlan(ctx, client, version, previousVersion, webhookImage, signingPolicy, runID, stateKeyRoot)
 			if err != nil {
 				fatalf("build sign-off plan for %s: %v", version, err)
@@ -195,7 +216,16 @@ func main() {
 	}
 
 	if targetVersion == "" {
-		fatalf("set -rancher-version or -latest-alpha")
+		fatalf("set -rancher-version, -latest-alpha, or -latest-alpha-per-line")
+	}
+
+	if reason, ignored := ignoreList.reasonFor(targetVersion); ignored {
+		p, err := ignoredPlan(targetVersion, reason, runID, stateKeyRoot)
+		if err != nil {
+			fatalf("build ignored sign-off plan: %v", err)
+		}
+		writeJSON(p, outputPath)
+		return
 	}
 
 	p, err := buildPlan(ctx, client, targetVersion, previousVersion, webhookImage, signingPolicy, runID, stateKeyRoot)
@@ -362,6 +392,105 @@ func readLedger(path string) (signoffLedger, error) {
 	return ledger, nil
 }
 
+func readTargetIgnoreList(path string) (targetIgnoreList, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return targetIgnoreList{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return targetIgnoreList{}, nil
+	}
+	if err != nil {
+		return targetIgnoreList{}, err
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return targetIgnoreList{}, nil
+	}
+	var ignoreList targetIgnoreList
+	if err := json.Unmarshal(data, &ignoreList); err != nil {
+		return targetIgnoreList{}, err
+	}
+	return normalizeTargetIgnoreList(ignoreList), nil
+}
+
+func normalizeTargetIgnoreList(ignoreList targetIgnoreList) targetIgnoreList {
+	normalized := targetIgnoreList{}
+	if len(ignoreList.Versions) > 0 {
+		normalized.Versions = map[string]string{}
+		for version, reason := range ignoreList.Versions {
+			version = strings.TrimSpace(version)
+			if version == "" {
+				continue
+			}
+			version = normalizeTag(version)
+			reason = strings.TrimSpace(reason)
+			if version != "" && reason != "" {
+				normalized.Versions[version] = reason
+			}
+		}
+	}
+	if len(ignoreList.ReleaseLines) > 0 {
+		normalized.ReleaseLines = map[string]string{}
+		for releaseLine, reason := range ignoreList.ReleaseLines {
+			releaseLine = normalizeReleaseLine(releaseLine)
+			reason = strings.TrimSpace(reason)
+			if releaseLine != "" && reason != "" {
+				normalized.ReleaseLines[releaseLine] = reason
+			}
+		}
+	}
+	return normalized
+}
+
+func (ignoreList targetIgnoreList) reasonFor(targetVersion string) (string, bool) {
+	if strings.TrimSpace(targetVersion) == "" {
+		return "", false
+	}
+	targetVersion = normalizeTag(targetVersion)
+	if reason := ignoreList.Versions[targetVersion]; reason != "" {
+		return reason, true
+	}
+	target, err := parseAlphaVersion(targetVersion)
+	if err != nil {
+		return "", false
+	}
+	releaseLine := fmt.Sprintf("v%d.%d", target.Major, target.Minor)
+	if reason := ignoreList.ReleaseLines[releaseLine]; reason != "" {
+		return reason, true
+	}
+	return "", false
+}
+
+func ignoredPlan(targetVersion, reason, runID, stateKeyRoot string) (plan, error) {
+	target, err := parseAlphaVersion(targetVersion)
+	if err != nil {
+		return plan{}, err
+	}
+	targetVersion = normalizeTag(targetVersion)
+	releaseLine := fmt.Sprintf("v%d.%d", target.Major, target.Minor)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "Target is listed in the repo-owned sign-off ignore list."
+	}
+	return plan{
+		TargetVersion: targetVersion,
+		ReleaseLine:   releaseLine,
+		RunID:         strings.TrimSpace(runID),
+		StateKeyRoot:  strings.Trim(strings.TrimSpace(stateKeyRoot), "/"),
+		Ignored:       true,
+		IgnoreReason:  reason,
+		Lanes:         []lane{},
+		SkippedLanes: []skippedLane{
+			{Name: laneFreshAlpha, Reason: reason},
+			{Name: laneUpgradeAlpha, Reason: reason},
+			{Name: laneLocalSuites, Reason: reason},
+			{Name: laneOldWebhook, Reason: reason},
+		},
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
 func applyLedgerSkips(p plan, ledger signoffLedger) plan {
 	if ledger.Entries == nil {
 		return p
@@ -461,6 +590,17 @@ func sanitizeAWSNamePart(value string) string {
 		}
 	}
 	return strings.Trim(b.String(), "-")
+}
+
+func normalizeReleaseLine(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "v") {
+		return value
+	}
+	return "v" + value
 }
 
 func (c githubClient) latestAlpha(ctx context.Context) (string, error) {

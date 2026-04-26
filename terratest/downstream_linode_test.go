@@ -166,6 +166,14 @@ func TestSelectLatestK3SReleaseVersionRequiresCompatibleRange(t *testing.T) {
 	}
 }
 
+func TestKDMMetadataURLForRancherVersion(t *testing.T) {
+	got := kdmMetadataURLForRancherVersion("v2.15.0-alpha3")
+	want := "https://releases.rancher.com/kontainer-driver-metadata/dev-v2.15/data.json"
+	if got != want {
+		t.Fatalf("kdmMetadataURLForRancherVersion() = %q, want %q", got, want)
+	}
+}
+
 func TestShortRunID(t *testing.T) {
 	if got := shortRunID("1234567890"); got != "34567890" {
 		t.Fatalf("shortRunID() = %q", got)

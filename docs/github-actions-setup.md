@@ -117,6 +117,17 @@ After environments, secrets, and variables are configured:
    next lane starts as soon as the globally serialized runner is free. If the
    ledger-filtered plan has no remaining lanes, it dispatches nothing.
 
+## Ignoring Known-Bad Targets
+
+Use `signoff-ignore.json` to temporarily remove known-bad Rancher alpha targets
+from repo-owned sign-off automation. Put a whole release line under
+`release_lines`, for example `v2.15`, or one alpha tag under `versions`, for
+example `v2.15.0-alpha3`.
+
+Ignored targets stay visible in `signoff-plan.json` with `ignored: true` and an
+empty `lanes` array, so scheduled planning can continue without launching runner
+jobs for that target.
+
 Use `keep_infra_on_failure=true` only for manual debugging. It can leave AWS and
 Linode resources running.
 

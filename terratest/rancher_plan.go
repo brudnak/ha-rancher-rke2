@@ -128,14 +128,24 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 		}
 
 		rancherImage, rancherImageTag, agentImage, imageExplanation := resolveImageSettings(requestedVersion, buildType, resolvedDistro)
-		if buildType != "release" && chartVersion == requestedVersion && shouldDropPrereleaseImageOverrides(chartRepoAlias) {
+		if buildType != "release" && chartVersion == requestedVersion && chartRepoAlias == "rancher-prime" {
 			rancherImage = ""
 			rancherImageTag = ""
 			agentImage = ""
 			explanation = append(explanation, fmt.Sprintf("Using exact chart match %s/rancher@%s, so no Rancher image overrides are needed", chartRepoAlias, chartVersion))
 		}
-		if buildType != "release" && chartVersion == requestedVersion && !shouldDropPrereleaseImageOverrides(chartRepoAlias) {
-			explanation = append(explanation, fmt.Sprintf("Using exact chart match %s/rancher@%s, while keeping explicit staging Rancher image overrides for this optimus chart", chartRepoAlias, chartVersion))
+		if buildType != "release" && chartVersion == requestedVersion && isExactCommunityPrereleaseChart(chartRepoAlias) {
+			if err := validateResolvedRancherImages(rancherImage, rancherImageTag, agentImage); err != nil {
+				rancherImage = ""
+				agentImage = ""
+				imageExplanation = []string{fmt.Sprintf("Staging Rancher image override was unavailable for %s, using exact community chart/image defaults", requestedVersion)}
+				explanation = append(explanation, fmt.Sprintf("Using exact chart match %s/rancher@%s with community image defaults", chartRepoAlias, chartVersion))
+			} else {
+				explanation = append(explanation, fmt.Sprintf("Using exact chart match %s/rancher@%s with explicit staging Rancher image overrides", chartRepoAlias, chartVersion))
+			}
+		}
+		if buildType != "release" && chartVersion == requestedVersion && isExactStagingPrereleaseChart(chartRepoAlias) {
+			explanation = append(explanation, fmt.Sprintf("Using exact chart match %s/rancher@%s with explicit staging Rancher image overrides", chartRepoAlias, chartVersion))
 		}
 		if buildType != "release" && chartRepoAlias == "rancher-latest" {
 			rancherImage = ""
@@ -635,8 +645,12 @@ func resolveImageSettings(requestedVersion, buildType, resolvedDistro string) (s
 	}
 }
 
-func shouldDropPrereleaseImageOverrides(chartRepoAlias string) bool {
-	return !strings.HasPrefix(chartRepoAlias, "optimus-")
+func isExactCommunityPrereleaseChart(chartRepoAlias string) bool {
+	return chartRepoAlias == "rancher-alpha" || chartRepoAlias == "rancher-latest"
+}
+
+func isExactStagingPrereleaseChart(chartRepoAlias string) bool {
+	return strings.HasPrefix(chartRepoAlias, "optimus-") || chartRepoAlias == "rancher-optimus-alpha" || chartRepoAlias == "optimus-s3"
 }
 
 func validateResolvedRancherImages(rancherImage, rancherImageTag, agentImage string) error {

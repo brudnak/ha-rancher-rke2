@@ -120,14 +120,14 @@ go test -v -run '^TestHAControlPanel$' -timeout 0 -count=1 ./terratest
 go test -v -run '^TestHACleanup$' -timeout 30m ./terratest
 ```
 
-For GoLand, create or edit a Go Test run configuration and set:
+For GoLand, the gutter run button works for the guarded lifecycle tests as long as it generates an exact test pattern. If you create or edit a Go Test run configuration, set:
 
 - **Test kind / Run kind:** `Package`, `Directory`, or `Pattern` is fine if the **Pattern** is exact.
 - **Package path:** `github.com/brudnak/ha-rancher-rke2/terratest`
-- **Pattern:** one exact pattern, for example `^TestHACleanup$` or `^TestHAControlPanel$`
+- **Pattern:** one exact pattern, for example `^TestHaSetup$`, `^TestHACleanup$`, or `^TestHAControlPanel$`
 - **Go tool arguments / Additional go test arguments:** add `-timeout 30m` for cleanup, or `-timeout 0 -count=1` for the control panel
 
-If GoLand shows `Test ignored` with a message like `uses live infrastructure; run it explicitly`, the run configuration is using a broader pattern. Change the pattern to the anchored command above.
+If GoLand shows `Test ignored` with a message like `uses live infrastructure; run it explicitly`, the run configuration is using a broader pattern. Change the pattern to one exact test name.
 
 The control panel currently provides:
 

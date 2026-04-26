@@ -398,11 +398,11 @@ func latestK3SReleaseVersionFromRancherMetadata(rancherURL, bearerToken string) 
 		},
 	}
 
-	releases, err := k3sReleasesFromRancherMetadataConfig(client, rancherURL, bearerToken)
+	serverVersion, err := rancherServerVersion(client, rancherURL, bearerToken)
 	if err != nil {
 		return "", err
 	}
-	serverVersion, err := rancherServerVersion(client, rancherURL, bearerToken)
+	releases, err := k3sReleasesFromRancherMetadataConfig(client, rancherURL, bearerToken, serverVersion)
 	if err != nil {
 		return "", err
 	}
@@ -414,7 +414,7 @@ func latestK3SReleaseVersionFromRancherMetadata(rancherURL, bearerToken string) 
 	return version, nil
 }
 
-func k3sReleasesFromRancherMetadataConfig(client *http.Client, rancherURL, bearerToken string) ([]k3sRelease, error) {
+func k3sReleasesFromRancherMetadataConfig(client *http.Client, rancherURL, bearerToken, serverVersion string) ([]k3sRelease, error) {
 	var setting struct {
 		Value   string `json:"value"`
 		Default string `json:"default"`
@@ -440,14 +440,39 @@ func k3sReleasesFromRancherMetadataConfig(client *http.Client, rancherURL, beare
 	if strings.TrimSpace(config.URL) == "" {
 		return nil, fmt.Errorf("rke-metadata-config did not include a url")
 	}
+	log.Printf("[downstream] Reading K3s releases from Rancher KDM metadata %s", config.URL)
 
-	req, err := http.NewRequest(http.MethodGet, config.URL, nil)
+	releases, err := fetchK3SReleasesFromMetadataURL(client, config.URL)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := selectLatestK3SReleaseVersion(releases, serverVersion); err == nil {
+		return releases, nil
+	}
+
+	candidateURL := kdmMetadataURLForRancherVersion(serverVersion)
+	if candidateURL == "" || candidateURL == config.URL {
+		return releases, nil
+	}
+	log.Printf("[downstream] Rancher KDM metadata %s has no provisionable K3s versions for %s; checking %s", config.URL, serverVersion, candidateURL)
+	candidateReleases, err := fetchK3SReleasesFromMetadataURL(client, candidateURL)
+	if err != nil {
+		return releases, nil
+	}
+	if _, err := selectLatestK3SReleaseVersion(candidateReleases, serverVersion); err != nil {
+		return releases, nil
+	}
+	return nil, fmt.Errorf("Rancher KDM metadata %s has no provisionable K3s versions for %s, but %s does; Rancher also needs working /v1-k3s-release/releases and /v1-rke2-release/releases endpoints before downstream provisioning can proceed", config.URL, serverVersion, candidateURL)
+}
+
+func fetchK3SReleasesFromMetadataURL(client *http.Client, metadataURL string) ([]k3sRelease, error) {
+	req, err := http.NewRequest(http.MethodGet, metadataURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch KDM metadata %s: %w", config.URL, err)
+		return nil, fmt.Errorf("failed to fetch KDM metadata %s: %w", metadataURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -456,18 +481,29 @@ func k3sReleasesFromRancherMetadataConfig(client *http.Client, rancherURL, beare
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("KDM metadata %s returned HTTP %d: %s", config.URL, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("KDM metadata %s returned HTTP %d: %s", metadataURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-
 	var metadata struct {
 		K3S struct {
 			Releases []k3sRelease `json:"releases"`
 		} `json:"k3s"`
 	}
 	if err := json.Unmarshal(body, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to parse KDM metadata %s: %w", config.URL, err)
+		return nil, fmt.Errorf("failed to parse KDM metadata %s: %w", metadataURL, err)
 	}
 	return metadata.K3S.Releases, nil
+}
+
+func kdmMetadataURLForRancherVersion(rancherVersion string) string {
+	version, err := parseRancherVersion(rancherVersion)
+	if err != nil {
+		return ""
+	}
+	segments := version.Segments64()
+	if len(segments) < 2 {
+		return ""
+	}
+	return fmt.Sprintf("https://releases.rancher.com/kontainer-driver-metadata/dev-v%d.%d/data.json", segments[0], segments[1])
 }
 
 func rancherServerVersion(client *http.Client, rancherURL, bearerToken string) (string, error) {
@@ -505,15 +541,19 @@ func selectLatestK3SReleaseVersion(releases []k3sRelease, rancherVersion string)
 
 	var selectedVersion *goversion.Version
 	selectedOriginal := ""
+	withArgsCount := 0
+	compatibleCount := 0
 
 	for _, release := range releases {
 		version := normalizeK3SVersion(release.Version)
 		if version == "" || release.ServerArgs == nil || release.AgentArgs == nil {
 			continue
 		}
+		withArgsCount++
 		if !k3sReleaseSupportsRancherVersion(release, serverVersion) {
 			continue
 		}
+		compatibleCount++
 		parsed, err := parseRancherVersion(version)
 		if err != nil {
 			continue
@@ -525,7 +565,7 @@ func selectLatestK3SReleaseVersion(releases []k3sRelease, rancherVersion string)
 	}
 
 	if selectedOriginal == "" {
-		return "", fmt.Errorf("Rancher K3s release list did not contain any provisionable versions for Rancher %s", rancherVersion)
+		return "", fmt.Errorf("Rancher K3s release list did not contain any provisionable versions for Rancher %s (total releases=%d, releases with server/agent args=%d, compatible releases=%d)", rancherVersion, len(releases), withArgsCount, compatibleCount)
 	}
 	return selectedOriginal, nil
 }
