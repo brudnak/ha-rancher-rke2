@@ -1,6 +1,66 @@
 {
   "schema_version": 2,
   "entries": {
+    "v2.11.13-alpha5": {
+      "fresh-alpha": {
+        "status": "success",
+        "coverage_policy": "alpha-webhook-signoff-v2",
+        "run_id": "24970848189",
+        "run_url": "https://github.com/brudnak/ha-rancher-rke2/actions/runs/24970848189",
+        "workflow": "Run Alpha/Webhook Sign-Off",
+        "lane": "fresh-alpha",
+        "release_line": "v2.11",
+        "target_version": "v2.11.13-alpha5",
+        "previous_version": "v2.11.12",
+        "install_rancher": "v2.11.13-alpha5",
+        "webhook_changed": false,
+        "webhook_image": "registry.suse.com/rancher/rancher-webhook:v0.7.8",
+        "previous_webhook_build": "106.0.8+up0.7.8",
+        "previous_webhook_tag": "v0.7.8",
+        "target_webhook_build": "106.0.8+up0.7.8",
+        "target_webhook_tag": "v0.7.8",
+        "signing_policy": "report-only",
+        "signing_registry": "registry.suse.com",
+        "signing_verification": {
+          "target_version": "v2.11.13-alpha5",
+          "webhook_image": "registry.suse.com/rancher/rancher-webhook:v0.7.8",
+          "signing_policy": "report-only",
+          "tool": "slsactl",
+          "enforced": false,
+          "signature_verified": false,
+          "provenance_verified": false,
+          "sbom_verified": false,
+          "verification_error": "webhook image signature verification failed for registry.suse.com/rancher/rancher-webhook:v0.7.8: exit status 2\ncannot validate image registry.suse.com/rancher/rancher-webhook:v0.7.8: ensure you are using an image from the Prime registry\nfailed to run verify: no signatures found\nno signatures found",
+          "verified_at": "2026-04-27T00:24:10Z"
+        },
+        "rancher_install_resolution": {
+          "phase": "install",
+          "ha_index": 1,
+          "requested_version": "2.11.13-alpha5",
+          "requested_distro": "auto",
+          "build_type": "alpha",
+          "resolved_distro": "community-staging",
+          "chart_repo_alias": "optimus-rancher-alpha",
+          "chart_version": "2.11.13-alpha5",
+          "chart_source": "optimus-rancher-alpha/rancher@2.11.13-alpha5",
+          "rancher_image": "stgregistry.suse.com/rancher/rancher",
+          "rancher_image_tag": "v2.11.13-alpha5",
+          "agent_image": "stgregistry.suse.com/rancher/rancher-agent:v2.11.13-alpha5",
+          "compatibility_baseline": "2.11.12",
+          "recommended_rke2_version": "v1.32.13+rke2r1",
+          "resolution_notes": [
+            "Alpha build requested in auto mode, favoring Prime/staging chart sources before community charts",
+            "Using exact chart match optimus-rancher-alpha/rancher@2.11.13-alpha5 with explicit staging Rancher image overrides",
+            "Using staging Rancher images because the requested version is not a standard released community build",
+            "Using 2.11.12 as the latest released compatibility baseline for the 2.11 release line",
+            "Support matrix certifies RKE2 from v1.30 through v1.32",
+            "Selected v1.32.13+rke2r1 as the latest available RKE2 patch in the supported v1.32 line"
+          ]
+        },
+        "commit_sha": "69221db8a84a399a49f7a062925eb2930b740e83",
+        "completed_at": "2026-04-27T00:49:08Z"
+      }
+    },
     "v2.12.9-alpha6": {
       "fresh-alpha": {
         "status": "success",
