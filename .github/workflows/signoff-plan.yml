@@ -119,14 +119,23 @@ jobs:
                 }]
           ' signoff-plan.json > automation-output/signoff-dispatch-queue.json
 
-          active_runner_count="$(gh run list \
+          gh run list \
             --workflow run-alpha-webhook-signoff.yml \
-            --json databaseId,status \
-            --jq '[.[] | select((.databaseId | tostring) != env.IGNORE_ACTIVE_RUNNER_ID) | select(.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "requested" or .status == "waiting")] | length')"
+            --json databaseId,status,displayTitle,event,createdAt,url \
+            --jq '[.[] | select((.databaseId | tostring) != env.IGNORE_ACTIVE_RUNNER_ID) | select(.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "requested" or .status == "waiting")]' \
+            > automation-output/signoff-active-runners.json
 
+          queue_count="$(jq 'length' automation-output/signoff-dispatch-queue.json)"
+          active_runner_count="$(jq 'length' automation-output/signoff-active-runners.json)"
           dispatch_enabled="$DISPATCH_REQUESTED"
+          dispatch_reason="Dispatching the next uncovered sign-off lane."
           if [ "$dispatch_enabled" = "true" ] && [ "$active_runner_count" != "0" ]; then
             dispatch_enabled="false"
+            dispatch_reason="Dispatch blocked because another Run Alpha/Webhook Sign-Off workflow is active."
+          elif [ "$dispatch_enabled" != "true" ]; then
+            dispatch_reason="Dispatch was not requested for this event/input."
+          elif [ "$queue_count" = "0" ]; then
+            dispatch_reason="No uncovered sign-off lanes remain."
           fi
 
           if [ "$dispatch_enabled" = "true" ]; then
@@ -134,12 +143,48 @@ jobs:
           else
             printf '[]\n' > automation-output/signoff-dispatch-selected.json
           fi
+          printf '[]\n' > automation-output/signoff-dispatch-results.json
 
-          queue_count="$(jq 'length' automation-output/signoff-dispatch-queue.json)"
           selected_count="$(jq 'length' automation-output/signoff-dispatch-selected.json)"
+          if [ "$dispatch_enabled" = "true" ] && [ "$selected_count" = "0" ] && [ "$queue_count" != "0" ]; then
+            dispatch_reason="Dispatch was enabled, but no lane was selected."
+          fi
+
+          jq -n \
+            --argjson dispatch_requested "$DISPATCH_REQUESTED" \
+            --argjson dispatch_enabled "$dispatch_enabled" \
+            --arg dispatch_reason "$dispatch_reason" \
+            --arg ignored_active_runner_id "$IGNORE_ACTIVE_RUNNER_ID" \
+            --argjson active_runner_count "$active_runner_count" \
+            --argjson queue_count "$queue_count" \
+            --argjson selected_count "$selected_count" \
+            --slurpfile active automation-output/signoff-active-runners.json \
+            --slurpfile queue automation-output/signoff-dispatch-queue.json \
+            --slurpfile selected automation-output/signoff-dispatch-selected.json \
+            '{
+              dispatch_requested: $dispatch_requested,
+              dispatch_enabled: $dispatch_enabled,
+              dispatch_reason: $dispatch_reason,
+              active_runner_count: $active_runner_count,
+              ignored_active_runner_id: $ignored_active_runner_id,
+              queue_count: $queue_count,
+              selected_count: $selected_count,
+              active_runners: $active[0],
+              queued_lanes: $queue[0],
+              selected_lanes: $selected[0]
+            }' > automation-output/signoff-dispatch-summary.json
+
+          echo "Dispatch decision: $dispatch_reason"
+          echo "Dispatch queue:"
+          jq . automation-output/signoff-dispatch-queue.json
+          echo "Selected lanes:"
+          jq . automation-output/signoff-dispatch-selected.json
+          echo "Active runners:"
+          jq . automation-output/signoff-active-runners.json
           {
             echo "requested=$DISPATCH_REQUESTED"
             echo "enabled=$dispatch_enabled"
+            echo "reason=$dispatch_reason"
             echo "active_runner_count=$active_runner_count"
             echo "ignored_active_runner_id=$IGNORE_ACTIVE_RUNNER_ID"
             echo "queue_count=$queue_count"
@@ -184,10 +229,35 @@ jobs:
             fi
 
             gh "${args[@]}"
-            echo "- \`$rancher_version\` / \`$lane\`" >> "$GITHUB_STEP_SUMMARY"
+            sleep 3
+            dispatched_run="$(TARGET_RUN_TITLE="Run $rancher_version / $lane" gh run list \
+              --workflow run-alpha-webhook-signoff.yml \
+              --limit 20 \
+              --json databaseId,status,displayTitle,event,createdAt,url \
+              --jq '[.[] | select(.event == "workflow_dispatch") | select(.displayTitle == env.TARGET_RUN_TITLE)] | sort_by(.createdAt) | reverse | .[0] // {}')"
+            tmp="$(mktemp)"
+            jq \
+              --arg rancher_version "$rancher_version" \
+              --arg lane "$lane" \
+              --argjson dispatched_run "$dispatched_run" \
+              '. + [{
+                rancher_version: $rancher_version,
+                lane: $lane,
+                dispatch_command_completed: true,
+                observed_run: $dispatched_run
+              }]' automation-output/signoff-dispatch-results.json > "$tmp"
+            mv "$tmp" automation-output/signoff-dispatch-results.json
+
+            if [ "$(jq 'has("databaseId")' <<<"$dispatched_run")" = "true" ]; then
+              run_url="$(jq -r '.url' <<<"$dispatched_run")"
+              echo "- \`$rancher_version\` / \`$lane\`: $run_url" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- \`$rancher_version\` / \`$lane\`: dispatch command completed, but no matching run was observed yet." >> "$GITHUB_STEP_SUMMARY"
+            fi
           done
 
       - name: Write step summary
+        if: ${{ always() && hashFiles('signoff-plan.json') != '' && hashFiles('automation-output/signoff-dispatch-summary.json') != '' }}
         run: |
           {
             echo "## Alpha/webhook sign-off plan"
@@ -197,12 +267,18 @@ jobs:
             echo '```'
             echo ""
             echo "Dispatch requested: \`${{ steps.dispatch-queue.outputs.requested }}\`."
+            echo "Dispatch reason: \`${{ steps.dispatch-queue.outputs.reason }}\`."
             echo "Active lane runners: \`${{ steps.dispatch-queue.outputs.active_runner_count }}\`."
             echo "Ignored active runner id: \`${{ steps.dispatch-queue.outputs.ignored_active_runner_id }}\`."
             echo "Dispatch queue: \`${{ steps.dispatch-queue.outputs.queue_count }}\` lane(s); selected: \`${{ steps.dispatch-queue.outputs.selected_count }}\`."
+            echo ""
+            echo '```json'
+            cat automation-output/signoff-dispatch-summary.json
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload plan artifact
+        if: ${{ always() && hashFiles('signoff-plan.json') != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signoff-plan
@@ -210,3 +286,6 @@ jobs:
             signoff-plan.json
             automation-output/signoff-dispatch-queue.json
             automation-output/signoff-dispatch-selected.json
+            automation-output/signoff-active-runners.json
+            automation-output/signoff-dispatch-summary.json
+            automation-output/signoff-dispatch-results.json

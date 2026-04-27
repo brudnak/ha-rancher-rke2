@@ -30,6 +30,7 @@ var (
 	alphaVersionRE   = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)-alpha(\d+)$`)
 	releaseVersionRE = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)$`)
 	webhookBuildRE   = regexp.MustCompile(`(?m)^\s*webhookVersion:\s*["']?([^"'\s]+)["']?\s*$`)
+	errNoRecentAlpha = errors.New("no recent Rancher alpha release found")
 )
 
 type plan struct {
@@ -55,10 +56,11 @@ type plan struct {
 }
 
 type planSet struct {
-	Mode        string `json:"mode"`
-	MaxAgeDays  int    `json:"max_age_days"`
-	Plans       []plan `json:"plans"`
-	GeneratedAt string `json:"generated_at"`
+	Mode            string   `json:"mode"`
+	MaxAgeDays      int      `json:"max_age_days"`
+	Plans           []plan   `json:"plans"`
+	ResolutionNotes []string `json:"resolution_notes,omitempty"`
+	GeneratedAt     string   `json:"generated_at"`
 }
 
 type lane struct {
@@ -170,6 +172,18 @@ func main() {
 	if latestAlphaPerLine {
 		targets, err := client.latestAlphasPerLine(ctx, time.Duration(maxAgeDays)*24*time.Hour)
 		if err != nil {
+			if errors.Is(err, errNoRecentAlpha) {
+				writeJSON(planSet{
+					Mode:       "latest-alpha-per-line",
+					MaxAgeDays: maxAgeDays,
+					Plans:      []plan{},
+					ResolutionNotes: []string{
+						fmt.Sprintf("No Rancher alpha releases were found in the last %d day(s); no sign-off lanes were planned.", maxAgeDays),
+					},
+					GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+				}, outputPath)
+				return
+			}
 			fatalf("resolve latest alpha per line: %v", err)
 		}
 		plans := make([]plan, 0, len(targets))
@@ -620,7 +634,7 @@ func (c githubClient) latestAlphasPerLine(ctx context.Context, maxAge time.Durat
 	cutoff := time.Now().UTC().Add(-maxAge)
 	targets := latestAlphasPerLineFromReleases(releases, cutoff)
 	if len(targets) == 0 {
-		return nil, fmt.Errorf("no alpha release found in recent %s releases", rancherRepo)
+		return nil, fmt.Errorf("%w in recent %s releases", errNoRecentAlpha, rancherRepo)
 	}
 	return targets, nil
 }

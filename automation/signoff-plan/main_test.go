@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -350,6 +351,20 @@ func TestLatestAlphasPerLineReturnsNewestRecentAlphaPerLine(t *testing.T) {
 	want := []string{"v2.14.1-alpha7", "v2.13.5-alpha6", "v2.12.9-alpha6"}
 	if strings.Join(targets, ",") != strings.Join(want, ",") {
 		t.Fatalf("expected %v, got %v", want, targets)
+	}
+}
+
+func TestLatestAlphasPerLineReturnsNoRecentAlphaError(t *testing.T) {
+	client := fakeGitHubClient(t, map[string]string{
+		"/repos/rancher/rancher/releases": `[
+			{"tag_name":"v2.14.0","prerelease":false,"published_at":"2026-04-20T12:00:00Z"},
+			{"tag_name":"v2.15.0-alpha2","prerelease":true,"published_at":"2026-03-01T12:00:00Z"}
+		]`,
+	})
+
+	_, err := client.latestAlphasPerLine(context.Background(), 30*24*time.Hour)
+	if !errors.Is(err, errNoRecentAlpha) {
+		t.Fatalf("expected no recent alpha error, got %v", err)
 	}
 }
 
