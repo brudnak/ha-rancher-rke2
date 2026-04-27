@@ -129,6 +129,7 @@ func upgradeHAInstanceRancher(instanceNum int, outputs map[string]string, plan *
 		plan.RancherImage,
 		plan.RancherImageTag,
 		plan.AgentImage,
+		plan.UseRancherImageFields,
 	)
 	helmCommand = rancherHelmCommandForHA(helmCommand, haOutputs.RancherURL)
 

@@ -27,6 +27,7 @@ type RancherResolvedPlan struct {
 	RancherImage           string
 	RancherImageTag        string
 	AgentImage             string
+	UseRancherImageFields  bool
 	CompatibilityBaseline  string
 	SupportMatrixURL       string
 	RecommendedRKE2Version string

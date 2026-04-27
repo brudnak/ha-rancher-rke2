@@ -167,9 +167,7 @@ func TestValidateResolvedRancherImagesChecksExplicitRancherAndAgentImages(t *tes
 	}
 }
 
-func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T) {
-	t.Setenv("RANCHER_WEBHOOK_IMAGE", "registry.suse.com/rancher/rancher-webhook:v0.9.3")
-
+func TestBuildAutoHelmCommandsUsesImageFieldsForNewOptimusAlpha(t *testing.T) {
 	commands := buildAutoHelmCommands(
 		1,
 		rancherHelmOperationInstall,
@@ -179,17 +177,17 @@ func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T)
 		"stgregistry.suse.com/rancher/rancher",
 		"v2.14.1-alpha3",
 		"stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha3",
+		true,
 	)
 
 	command := commands[0]
 	expectedSnippets := []string{
 		"--set tls=external",
-		"--set systemDefaultRegistry=stgregistry.suse.com",
-		"--set rancherImage=stgregistry.suse.com/rancher/rancher",
-		"--set rancherImageTag=v2.14.1-alpha3",
+		"--set image.registry=stgregistry.suse.com",
+		"--set image.repository=rancher/rancher",
+		"--set image.tag=v2.14.1-alpha3",
 		"--set 'extraEnv[0].name=CATTLE_AGENT_IMAGE'",
-		"--set 'extraEnv[0].value=rancher/rancher-agent:v2.14.1-alpha3'",
-		"--set webhook.global.cattle.systemDefaultRegistry=registry.suse.com",
+		"--set 'extraEnv[0].value=stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha3'",
 	}
 
 	for _, snippet := range expectedSnippets {
@@ -199,6 +197,66 @@ func TestBuildAutoHelmCommandsKeepsStagingOverridesForOptimusAlpha(t *testing.T)
 	}
 	if strings.Contains(command, "ingress.tls.source=secret") {
 		t.Fatalf("expected external TLS termination, got:\n%s", command)
+	}
+	if strings.Contains(command, "rancherImage") || strings.Contains(command, "systemDefaultRegistry") || strings.Contains(command, "webhook.global") {
+		t.Fatalf("expected Optimus alpha command to use new image fields without default registry or webhook overrides, got:\n%s", command)
+	}
+}
+
+func TestBuildAutoHelmCommandsKeepsLegacyOverridesForOldOptimusAlpha(t *testing.T) {
+	commands := buildAutoHelmCommands(
+		1,
+		rancherHelmOperationInstall,
+		"optimus-rancher-alpha",
+		"2.11.13-alpha5",
+		"admin",
+		"stgregistry.suse.com/rancher/rancher",
+		"v2.11.13-alpha5",
+		"stgregistry.suse.com/rancher/rancher-agent:v2.11.13-alpha5",
+		false,
+	)
+
+	command := commands[0]
+	expectedSnippets := []string{
+		"--set rancherImage=stgregistry.suse.com/rancher/rancher",
+		"--set rancherImageTag=v2.11.13-alpha5",
+		"--set 'extraEnv[0].value=stgregistry.suse.com/rancher/rancher-agent:v2.11.13-alpha5'",
+	}
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(command, snippet) {
+			t.Fatalf("expected helm command to contain %q, got:\n%s", snippet, command)
+		}
+	}
+	if strings.Contains(command, "image.registry") || strings.Contains(command, "image.repository") || strings.Contains(command, "image.tag") {
+		t.Fatalf("expected old Optimus alpha command to keep legacy image values, got:\n%s", command)
+	}
+}
+
+func TestBuildAutoHelmCommandClearsPrimeDefaultRegistryForStagingFallback(t *testing.T) {
+	command := buildAutoHelmCommand(
+		rancherHelmOperationInstall,
+		"rancher-prime",
+		"2.13.4",
+		"admin",
+		"stgregistry.suse.com/rancher/rancher",
+		"v2.13.5-alpha6",
+		"stgregistry.suse.com/rancher/rancher-agent:v2.13.5-alpha6",
+		true,
+	)
+
+	expectedSnippets := []string{
+		"helm install rancher rancher-prime/rancher",
+		"--version 2.13.4",
+		"--set systemDefaultRegistry=",
+		"--set image.registry=stgregistry.suse.com",
+		"--set image.repository=rancher/rancher",
+		"--set image.tag=v2.13.5-alpha6",
+		"--set 'extraEnv[0].value=stgregistry.suse.com/rancher/rancher-agent:v2.13.5-alpha6'",
+	}
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(command, snippet) {
+			t.Fatalf("expected helm command to contain %q, got:\n%s", snippet, command)
+		}
 	}
 }
 
@@ -212,12 +270,13 @@ func TestBuildAutoHelmCommandsCanUseCommunityAlphaImageFallback(t *testing.T) {
 		"",
 		"v2.15.0-alpha3",
 		"",
+		true,
 	)
 
 	command := commands[0]
 	expectedSnippets := []string{
 		"helm install rancher rancher-alpha/rancher",
-		"--set rancherImageTag=v2.15.0-alpha3",
+		"--set image.tag=v2.15.0-alpha3",
 	}
 
 	for _, snippet := range expectedSnippets {
@@ -231,8 +290,6 @@ func TestBuildAutoHelmCommandsCanUseCommunityAlphaImageFallback(t *testing.T) {
 }
 
 func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
-	t.Setenv("RANCHER_WEBHOOK_IMAGE", "registry.suse.com/rancher/rancher-webhook:v0.9.3")
-
 	command := buildAutoHelmCommand(
 		rancherHelmOperationUpgrade,
 		"optimus-rancher-alpha",
@@ -241,6 +298,7 @@ func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
 		"stgregistry.suse.com/rancher/rancher",
 		"v2.14.1-alpha6",
 		"stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha6",
+		true,
 	)
 
 	expectedSnippets := []string{
@@ -249,12 +307,11 @@ func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
 		"--version 2.14.1-alpha6",
 		"--set hostname=placeholder",
 		"--set tls=external",
-		"--set systemDefaultRegistry=stgregistry.suse.com",
-		"--set rancherImage=stgregistry.suse.com/rancher/rancher",
-		"--set rancherImageTag=v2.14.1-alpha6",
+		"--set image.registry=stgregistry.suse.com",
+		"--set image.repository=rancher/rancher",
+		"--set image.tag=v2.14.1-alpha6",
 		"--set 'extraEnv[0].name=CATTLE_AGENT_IMAGE'",
-		"--set 'extraEnv[0].value=rancher/rancher-agent:v2.14.1-alpha6'",
-		"--set webhook.global.cattle.systemDefaultRegistry=registry.suse.com",
+		"--set 'extraEnv[0].value=stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha6'",
 		"--wait",
 		"--wait-for-jobs",
 		"--timeout 30m",
@@ -268,44 +325,78 @@ func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
 	if strings.Contains(command, "ingress.tls.source=secret") {
 		t.Fatalf("expected external TLS termination, got:\n%s", command)
 	}
+	if strings.Contains(command, "webhook.global") {
+		t.Fatalf("expected Optimus upgrade command not to include webhook overrides, got:\n%s", command)
+	}
 }
 
-func TestNormalizeHelmImageSettingsUsesStagingDefaultRegistryForQualifiedAgent(t *testing.T) {
-	t.Setenv("RANCHER_WEBHOOK_IMAGE", "registry.suse.com/rancher/rancher-webhook:v0.9.3")
-
+func TestNormalizeHelmImageSettingsLeavesOptimusAlphaOverridesDocShaped(t *testing.T) {
 	settings := normalizeHelmImageSettings(
+		"optimus-rancher-alpha",
 		"stgregistry.suse.com/rancher/rancher",
+		"v2.13.5-alpha6",
 		"stgregistry.suse.com/rancher/rancher-agent:v2.13.5-alpha6",
+		true,
 	)
 
-	if settings.systemDefaultRegistry != "stgregistry.suse.com" {
-		t.Fatalf("expected staging system default registry, got %q", settings.systemDefaultRegistry)
+	if settings.clearSystemDefaultRegistry {
+		t.Fatal("expected Optimus alpha command not to clear system default registry")
 	}
-	if settings.rancherImage != "stgregistry.suse.com/rancher/rancher" {
-		t.Fatalf("expected qualified Rancher image, got %q", settings.rancherImage)
+	if settings.imageRegistry != "stgregistry.suse.com" || settings.imageRepository != "rancher/rancher" || settings.imageTag != "v2.13.5-alpha6" {
+		t.Fatalf("expected staging Rancher image fields, got registry=%q repository=%q tag=%q", settings.imageRegistry, settings.imageRepository, settings.imageTag)
 	}
-	if settings.agentImage != "rancher/rancher-agent:v2.13.5-alpha6" {
-		t.Fatalf("expected relative agent image, got %q", settings.agentImage)
-	}
-	if settings.webhookRegistry != "registry.suse.com" {
-		t.Fatalf("expected webhook registry override, got %q", settings.webhookRegistry)
+	if settings.agentImage != "stgregistry.suse.com/rancher/rancher-agent:v2.13.5-alpha6" {
+		t.Fatalf("expected qualified agent image, got %q", settings.agentImage)
 	}
 }
 
 func TestNormalizeHelmImageSettingsLeavesDefaultRegistryForChartDefaultAgent(t *testing.T) {
 	settings := normalizeHelmImageSettings(
+		"rancher-prime",
 		"registry.rancher.com/rancher/rancher",
+		"v2.13.4",
 		"",
+		true,
 	)
 
-	if settings.systemDefaultRegistry != "" {
-		t.Fatalf("expected no system default registry override, got %q", settings.systemDefaultRegistry)
+	if settings.clearSystemDefaultRegistry {
+		t.Fatal("expected no system default registry override")
 	}
-	if settings.rancherImage != "registry.rancher.com/rancher/rancher" {
-		t.Fatalf("expected qualified Rancher image to be preserved, got %q", settings.rancherImage)
+	if settings.imageRegistry != "registry.rancher.com" || settings.imageRepository != "rancher/rancher" || settings.imageTag != "v2.13.4" {
+		t.Fatalf("expected Prime image fields, got registry=%q repository=%q tag=%q", settings.imageRegistry, settings.imageRepository, settings.imageTag)
 	}
 	if settings.agentImage != "" {
 		t.Fatalf("expected empty agent image to be preserved, got %q", settings.agentImage)
+	}
+}
+
+func TestValuesSupportTopLevelRancherImageFields(t *testing.T) {
+	values := `
+auditLog:
+  image:
+    repository: rancher/mirrored-bci-micro
+    tag: 15.6.24.2
+image:
+  repository: rancher/rancher
+  tag: ""
+`
+
+	if !valuesSupportTopLevelRancherImageFields(values) {
+		t.Fatal("expected top-level Rancher image fields to be detected")
+	}
+}
+
+func TestValuesSupportTopLevelRancherImageFieldsIgnoresNestedOnly(t *testing.T) {
+	values := `
+auditLog:
+  image:
+    repository: rancher/mirrored-bci-micro
+    tag: 15.6.24.2
+rancherImage: stgregistry.suse.com/rancher/rancher
+`
+
+	if valuesSupportTopLevelRancherImageFields(values) {
+		t.Fatal("expected nested image fields not to count as Rancher image field support")
 	}
 }
 
@@ -318,6 +409,7 @@ func TestRancherHelmCommandForHAReplacesPlaceholder(t *testing.T) {
 		"",
 		"",
 		"",
+		false,
 	)
 
 	command = rancherHelmCommandForHA(command, "rancher.example.com")

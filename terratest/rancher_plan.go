@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -164,6 +163,15 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 		if compatibilityBaseline != requestedVersion {
 			explanation = append(explanation, fmt.Sprintf("Using %s as the latest released compatibility baseline for the %s release line", compatibilityBaseline, minorLine))
 		}
+		useRancherImageFields, err := chartSupportsRancherImageFields(chartRepoAlias, chartVersion)
+		if err != nil {
+			log.Printf("[resolver] Failed to inspect image field support for %s/rancher@%s: %v", chartRepoAlias, chartVersion, err)
+			explanation = append(explanation, fmt.Sprintf("Could not inspect %s/rancher@%s for image.* support, using legacy Rancher image chart values", chartRepoAlias, chartVersion))
+		} else if useRancherImageFields {
+			explanation = append(explanation, fmt.Sprintf("Using current image.registry/image.repository/image.tag chart values for %s/rancher@%s", chartRepoAlias, chartVersion))
+		} else {
+			explanation = append(explanation, fmt.Sprintf("Using legacy rancherImage/rancherImageTag chart values for %s/rancher@%s", chartRepoAlias, chartVersion))
+		}
 
 		supportMatrixURL := buildSupportMatrixURL(compatibilityBaseline)
 		highestRKE2Minor, supportExplanation, err := resolveHighestSupportedRKE2Minor(supportMatrixURL)
@@ -183,7 +191,7 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 			return nil, err
 		}
 
-		helmCommands := buildAutoHelmCommands(1, rancherHelmOperationInstall, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage)
+		helmCommands := buildAutoHelmCommands(1, rancherHelmOperationInstall, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage, useRancherImageFields)
 
 		plans = append(plans, &RancherResolvedPlan{
 			Mode:                   "auto",
@@ -196,6 +204,7 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 			RancherImage:           rancherImage,
 			RancherImageTag:        rancherImageTag,
 			AgentImage:             agentImage,
+			UseRancherImageFields:  useRancherImageFields,
 			CompatibilityBaseline:  compatibilityBaseline,
 			SupportMatrixURL:       supportMatrixURL,
 			RecommendedRKE2Version: recommendedRKE2Version,
@@ -905,8 +914,8 @@ func resolveInstallerSHA256(rke2Version string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func buildAutoHelmCommands(totalHAs int, operation, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage string) []string {
-	command := buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage)
+func buildAutoHelmCommands(totalHAs int, operation, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage string, useRancherImageFields bool) []string {
+	command := buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage, useRancherImageFields)
 	commands := make([]string, totalHAs)
 	for i := 0; i < totalHAs; i++ {
 		commands[i] = command
@@ -914,12 +923,12 @@ func buildAutoHelmCommands(totalHAs int, operation, chartRepoAlias, chartVersion
 	return commands
 }
 
-func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage string) string {
+func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPassword, rancherImage, rancherImageTag, agentImage string, useRancherImageFields bool) string {
 	operation = strings.ToLower(strings.TrimSpace(operation))
 	if operation == "" {
 		operation = rancherHelmOperationInstall
 	}
-	helmImages := normalizeHelmImageSettings(rancherImage, agentImage)
+	helmImages := normalizeHelmImageSettings(chartRepoAlias, rancherImage, rancherImageTag, agentImage, useRancherImageFields)
 
 	var baseSettings []string
 	switch operation {
@@ -946,9 +955,24 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 		"  --set agentTLSMode=system-store",
 	}...)
 
-	if helmImages.systemDefaultRegistry != "" {
+	if helmImages.clearSystemDefaultRegistry {
 		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
-			"  --set systemDefaultRegistry=" + helmImages.systemDefaultRegistry + " \\",
+			"  --set systemDefaultRegistry= \\",
+		}, baseSettings[len(baseSettings)-1:]...)...)
+	}
+	if helmImages.imageRegistry != "" {
+		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
+			"  --set image.registry=" + helmImages.imageRegistry + " \\",
+		}, baseSettings[len(baseSettings)-1:]...)...)
+	}
+	if helmImages.imageRepository != "" {
+		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
+			"  --set image.repository=" + helmImages.imageRepository + " \\",
+		}, baseSettings[len(baseSettings)-1:]...)...)
+	}
+	if helmImages.imageTag != "" {
+		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
+			"  --set image.tag=" + helmImages.imageTag + " \\",
 		}, baseSettings[len(baseSettings)-1:]...)...)
 	}
 	if helmImages.rancherImage != "" {
@@ -956,9 +980,9 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 			"  --set rancherImage=" + helmImages.rancherImage + " \\",
 		}, baseSettings[len(baseSettings)-1:]...)...)
 	}
-	if rancherImageTag != "" {
+	if helmImages.rancherImageTag != "" {
 		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
-			"  --set rancherImageTag=" + rancherImageTag + " \\",
+			"  --set rancherImageTag=" + helmImages.rancherImageTag + " \\",
 		}, baseSettings[len(baseSettings)-1:]...)...)
 	}
 	if helmImages.agentImage != "" {
@@ -967,12 +991,6 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 			"  --set 'extraEnv[0].value=" + helmImages.agentImage + "' \\",
 		}, baseSettings[len(baseSettings)-1:]...)...)
 	}
-	if helmImages.webhookRegistry != "" {
-		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
-			"  --set webhook.global.cattle.systemDefaultRegistry=" + helmImages.webhookRegistry + " \\",
-		}, baseSettings[len(baseSettings)-1:]...)...)
-	}
-
 	if operation == rancherHelmOperationUpgrade {
 		baseSettings = append(baseSettings[:len(baseSettings)-1], append([]string{
 			"  --wait \\",
@@ -985,26 +1003,93 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 }
 
 type helmImageSettings struct {
-	systemDefaultRegistry string
-	rancherImage          string
-	agentImage            string
-	webhookRegistry       string
+	clearSystemDefaultRegistry bool
+	rancherImage               string
+	rancherImageTag            string
+	imageRegistry              string
+	imageRepository            string
+	imageTag                   string
+	agentImage                 string
 }
 
-func normalizeHelmImageSettings(rancherImage, agentImage string) helmImageSettings {
+func normalizeHelmImageSettings(chartRepoAlias, rancherImage, rancherImageTag, agentImage string, useRancherImageFields bool) helmImageSettings {
 	settings := helmImageSettings{
-		rancherImage: strings.TrimSpace(rancherImage),
-		agentImage:   strings.TrimSpace(agentImage),
+		agentImage: strings.TrimSpace(agentImage),
+	}
+	rancherImage = strings.TrimSpace(rancherImage)
+	rancherImageTag = strings.TrimSpace(rancherImageTag)
+
+	if useRancherImageFields {
+		settings.imageTag = rancherImageTag
+		if imageRegistry, imageRepository, ok := splitRegistryRepository(rancherImage); ok {
+			settings.imageRegistry = imageRegistry
+			settings.imageRepository = imageRepository
+		} else {
+			settings.imageRepository = rancherImage
+		}
+	} else {
+		settings.rancherImage = rancherImage
+		settings.rancherImageTag = rancherImageTag
 	}
 
-	rancherRegistry, _, rancherOK := splitRegistryRepository(settings.rancherImage)
-	agentRegistry, agentRepositoryTag, agentOK := splitRegistryRepository(settings.agentImage)
-	if rancherOK && agentOK && rancherRegistry == agentRegistry {
-		settings.systemDefaultRegistry = agentRegistry
-		settings.agentImage = agentRepositoryTag
-		settings.webhookRegistry = webhookSystemDefaultRegistryOverride(agentRegistry)
+	agentRegistry, _, agentOK := splitRegistryRepository(settings.agentImage)
+	// Internal Rancher validation docs for Optimus alpha/head/RC builds pass
+	// staging Rancher and agent image refs directly. Newer charts express the
+	// Rancher server image via image.* fields, but the intent is the same:
+	// staging registry, rancher/rancher repository, requested tag, full staging
+	// CATTLE_AGENT_IMAGE. Only the Prime fallback path needs this pressure valve:
+	// Prime charts default systemDefaultRegistry to registry.rancher.com, which
+	// would otherwise prefix the explicit staging CATTLE_AGENT_IMAGE. Avoid
+	// webhook overrides here; the chart defaults webhook to a string and Helm
+	// warns when we force it into a nested table from --set.
+	if chartRepoAlias == "rancher-prime" && agentOK && agentRegistry != "registry.rancher.com" {
+		settings.clearSystemDefaultRegistry = true
 	}
 	return settings
+}
+
+func chartSupportsRancherImageFields(chartRepoAlias, chartVersion string) (bool, error) {
+	output, err := exec.Command("helm", "show", "values", chartRepoAlias+"/rancher", "--version", chartVersion).Output()
+	if err != nil {
+		return false, fmt.Errorf("helm show values failed: %w", err)
+	}
+	return valuesSupportTopLevelRancherImageFields(string(output)), nil
+}
+
+func valuesSupportTopLevelRancherImageFields(values string) bool {
+	inImageBlock := false
+	hasRepository := false
+	hasTag := false
+
+	for _, line := range strings.Split(values, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent == 0 {
+			if inImageBlock {
+				return hasRepository && hasTag
+			}
+			if trimmed == "image:" {
+				inImageBlock = true
+			}
+			continue
+		}
+		if !inImageBlock {
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(trimmed, "repository:"):
+			hasRepository = true
+		case strings.HasPrefix(trimmed, "tag:"):
+			hasTag = true
+		}
+	}
+
+	return inImageBlock && hasRepository && hasTag
 }
 
 func splitRegistryRepository(image string) (string, string, bool) {
@@ -1017,18 +1102,6 @@ func splitRegistryRepository(image string) (string, string, bool) {
 		return "", "", false
 	}
 	return registry, repository, true
-}
-
-func webhookSystemDefaultRegistryOverride(systemDefaultRegistry string) string {
-	webhookImage := strings.TrimSpace(os.Getenv("RANCHER_WEBHOOK_IMAGE"))
-	if webhookImage == "" {
-		return ""
-	}
-	registry, _, _, err := parseRegistryImage(webhookImage)
-	if err != nil || registry == "" || registry == systemDefaultRegistry {
-		return ""
-	}
-	return registry
 }
 
 func fetchURLBody(url string) (string, error) {

@@ -20,6 +20,7 @@ type rancherResolutionArtifact struct {
 	RancherImage           string   `json:"rancher_image,omitempty"`
 	RancherImageTag        string   `json:"rancher_image_tag,omitempty"`
 	AgentImage             string   `json:"agent_image,omitempty"`
+	UseRancherImageFields  bool     `json:"use_rancher_image_fields,omitempty"`
 	CompatibilityBaseline  string   `json:"compatibility_baseline,omitempty"`
 	RecommendedRKE2Version string   `json:"recommended_rke2_version,omitempty"`
 	ResolutionNotes        []string `json:"resolution_notes,omitempty"`
@@ -42,6 +43,7 @@ func writeRancherResolutionArtifact(phase string, instanceNum int, plan *Rancher
 		RancherImage:           plan.RancherImage,
 		RancherImageTag:        plan.RancherImageTag,
 		AgentImage:             plan.AgentImage,
+		UseRancherImageFields:  plan.UseRancherImageFields,
 		CompatibilityBaseline:  plan.CompatibilityBaseline,
 		RecommendedRKE2Version: plan.RecommendedRKE2Version,
 		ResolutionNotes:        plan.Explanation,
