@@ -1,5 +1,7 @@
 {
-  "release_lines": {},
+  "release_lines": {
+    "v2.15": "dsc prov issue"
+  },
   "versions": {
     "v2.14.1-alpha8" : "webhook chart issue"
   }
