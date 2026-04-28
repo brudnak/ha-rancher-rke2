@@ -1,7 +1,5 @@
 {
-  "release_lines": {
-    "v2.15": "Temporarily disabled while the v2.15 alpha line is known-bad for repo-owned sign-off automation."
-  },
+  "release_lines": {},
   "versions": {
     "v2.14.1-alpha8" : "webhook chart issue"
   }
