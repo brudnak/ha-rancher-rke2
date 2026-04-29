@@ -27,10 +27,15 @@ on:
           - report-only
           - skip
       dispatch_runs:
-        description: Dispatch the next uncovered sign-off lane after planning.
+        description: Dispatch uncovered sign-off lanes after planning.
         required: true
         default: false
         type: boolean
+      max_parallel_lanes:
+        description: Maximum active sign-off lane runners to allow.
+        required: false
+        default: 4
+        type: number
       ignore_active_runner_id:
         description: Active Run Alpha/Webhook Sign-Off run id to ignore when this planner was woken by that runner.
         required: false
@@ -47,6 +52,10 @@ on:
 permissions:
   actions: write
   contents: read
+
+concurrency:
+  group: signoff-plan
+  cancel-in-progress: false
 
 jobs:
   plan:
@@ -98,6 +107,7 @@ jobs:
         id: dispatch-queue
         env:
           DISPATCH_REQUESTED: ${{ github.event_name == 'schedule' || github.event.inputs.dispatch_runs == 'true' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
+          MAX_PARALLEL_LANES: ${{ github.event.inputs.max_parallel_lanes || '4' }}
           IGNORE_ACTIVE_RUNNER_ID: ${{ github.event.inputs.ignore_active_runner_id || '' }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -127,11 +137,24 @@ jobs:
 
           queue_count="$(jq 'length' automation-output/signoff-dispatch-queue.json)"
           active_runner_count="$(jq 'length' automation-output/signoff-active-runners.json)"
+          if ! [[ "$MAX_PARALLEL_LANES" =~ ^[0-9]+$ ]] || [ "$MAX_PARALLEL_LANES" -lt 1 ]; then
+            echo "max_parallel_lanes must be a positive integer, got '$MAX_PARALLEL_LANES'"
+            exit 1
+          fi
+          max_parallel_lanes="$MAX_PARALLEL_LANES"
+          if [ "$max_parallel_lanes" -gt 4 ]; then
+            max_parallel_lanes=4
+          fi
+          available_runner_count=$((max_parallel_lanes - active_runner_count))
+          if [ "$available_runner_count" -lt 0 ]; then
+            available_runner_count=0
+          fi
+
           dispatch_enabled="$DISPATCH_REQUESTED"
-          dispatch_reason="Dispatching the next uncovered sign-off lane."
-          if [ "$dispatch_enabled" = "true" ] && [ "$active_runner_count" != "0" ]; then
+          dispatch_reason="Dispatching up to ${available_runner_count} uncovered sign-off lane(s)."
+          if [ "$dispatch_enabled" = "true" ] && [ "$available_runner_count" = "0" ]; then
             dispatch_enabled="false"
-            dispatch_reason="Dispatch blocked because another Run Alpha/Webhook Sign-Off workflow is active."
+            dispatch_reason="Dispatch blocked because active Run Alpha/Webhook Sign-Off workflows reached max_parallel_lanes=${max_parallel_lanes}."
           elif [ "$dispatch_enabled" != "true" ]; then
             dispatch_reason="Dispatch was not requested for this event/input."
           elif [ "$queue_count" = "0" ]; then
@@ -139,7 +162,7 @@ jobs:
           fi
 
           if [ "$dispatch_enabled" = "true" ]; then
-            jq '.[0:1]' automation-output/signoff-dispatch-queue.json > automation-output/signoff-dispatch-selected.json
+            jq --argjson limit "$available_runner_count" '.[0:$limit]' automation-output/signoff-dispatch-queue.json > automation-output/signoff-dispatch-selected.json
           else
             printf '[]\n' > automation-output/signoff-dispatch-selected.json
           fi
@@ -155,6 +178,8 @@ jobs:
             --argjson dispatch_enabled "$dispatch_enabled" \
             --arg dispatch_reason "$dispatch_reason" \
             --arg ignored_active_runner_id "$IGNORE_ACTIVE_RUNNER_ID" \
+            --argjson max_parallel_lanes "$max_parallel_lanes" \
+            --argjson available_runner_count "$available_runner_count" \
             --argjson active_runner_count "$active_runner_count" \
             --argjson queue_count "$queue_count" \
             --argjson selected_count "$selected_count" \
@@ -165,6 +190,8 @@ jobs:
               dispatch_requested: $dispatch_requested,
               dispatch_enabled: $dispatch_enabled,
               dispatch_reason: $dispatch_reason,
+              max_parallel_lanes: $max_parallel_lanes,
+              available_runner_count: $available_runner_count,
               active_runner_count: $active_runner_count,
               ignored_active_runner_id: $ignored_active_runner_id,
               queue_count: $queue_count,
@@ -185,13 +212,15 @@ jobs:
             echo "requested=$DISPATCH_REQUESTED"
             echo "enabled=$dispatch_enabled"
             echo "reason=$dispatch_reason"
+            echo "max_parallel_lanes=$max_parallel_lanes"
+            echo "available_runner_count=$available_runner_count"
             echo "active_runner_count=$active_runner_count"
             echo "ignored_active_runner_id=$IGNORE_ACTIVE_RUNNER_ID"
             echo "queue_count=$queue_count"
             echo "selected_count=$selected_count"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch next sign-off lane
+      - name: Dispatch selected sign-off lanes
         if: steps.dispatch-queue.outputs.enabled == 'true' && steps.dispatch-queue.outputs.selected_count != '0'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -268,6 +297,8 @@ jobs:
             echo ""
             echo "Dispatch requested: \`${{ steps.dispatch-queue.outputs.requested }}\`."
             echo "Dispatch reason: \`${{ steps.dispatch-queue.outputs.reason }}\`."
+            echo "Max parallel lanes: \`${{ steps.dispatch-queue.outputs.max_parallel_lanes }}\`."
+            echo "Available runner slots: \`${{ steps.dispatch-queue.outputs.available_runner_count }}\`."
             echo "Active lane runners: \`${{ steps.dispatch-queue.outputs.active_runner_count }}\`."
             echo "Ignored active runner id: \`${{ steps.dispatch-queue.outputs.ignored_active_runner_id }}\`."
             echo "Dispatch queue: \`${{ steps.dispatch-queue.outputs.queue_count }}\` lane(s); selected: \`${{ steps.dispatch-queue.outputs.selected_count }}\`."

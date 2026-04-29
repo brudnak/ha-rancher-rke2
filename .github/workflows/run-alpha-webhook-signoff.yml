@@ -57,7 +57,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: run-alpha-webhook-signoff
+  group: run-alpha-webhook-signoff-${{ inputs.rancher_version }}-${{ inputs.lane }}
   cancel-in-progress: false
 
 jobs:
@@ -538,28 +538,47 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull --ff-only origin "${GITHUB_REF_NAME}"
 
-          "$RUNNER_TEMP/signoff-ledger" \
-            -plan signoff-plan.json \
-            -ledger signoff-ledger.json \
-            -lane "${{ inputs.lane }}" \
-            -status success \
-            -run-id "${{ github.run_id }}" \
-            -run-url "$RUN_URL" \
-            -workflow "${{ github.workflow }}" \
-            -commit-sha "${{ github.sha }}" \
-            -signing-result automation-output/webhook-signing.json \
-            -install-resolution automation-output/rancher-resolution-install-ha-1.json \
-            -upgrade-resolution automation-output/rancher-resolution-upgrade-ha-1.json
+          max_attempts=5
+          completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for attempt in $(seq 1 "$max_attempts"); do
+            git pull --rebase origin "${GITHUB_REF_NAME}"
 
-          git add signoff-ledger.json
-          if git diff --cached --quiet; then
-            echo "No sign-off ledger changes to commit."
-            exit 0
-          fi
-          git commit -m "Record sign-off ${{ inputs.rancher_version }} ${{ inputs.lane }}"
-          git push
+            "$RUNNER_TEMP/signoff-ledger" \
+              -plan signoff-plan.json \
+              -ledger signoff-ledger.json \
+              -lane "${{ inputs.lane }}" \
+              -status success \
+              -run-id "${{ github.run_id }}" \
+              -run-url "$RUN_URL" \
+              -workflow "${{ github.workflow }}" \
+              -commit-sha "${{ github.sha }}" \
+              -completed-at "$completed_at" \
+              -signing-result automation-output/webhook-signing.json \
+              -install-resolution automation-output/rancher-resolution-install-ha-1.json \
+              -upgrade-resolution automation-output/rancher-resolution-upgrade-ha-1.json
+
+            git add signoff-ledger.json
+            ahead_count="$(git rev-list --count "origin/${GITHUB_REF_NAME}..HEAD")"
+            if git diff --cached --quiet && [ "$ahead_count" = "0" ]; then
+              echo "No sign-off ledger changes to commit."
+              exit 0
+            fi
+            if ! git diff --cached --quiet; then
+              git commit -m "Record sign-off ${{ inputs.rancher_version }} ${{ inputs.lane }}"
+            fi
+            if git push; then
+              exit 0
+            fi
+            if [ "$attempt" = "$max_attempts" ]; then
+              break
+            fi
+            echo "Ledger push failed on attempt ${attempt}/${max_attempts}; retrying after rebase."
+            sleep $((attempt * 5))
+          done
+
+          echo "Failed to push sign-off ledger after ${max_attempts} attempts."
+          exit 1
 
       - name: Write step summary
         if: always()
