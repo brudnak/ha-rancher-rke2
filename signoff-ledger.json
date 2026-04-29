@@ -1591,6 +1591,89 @@
         },
         "commit_sha": "41729957eeed66b62890b0755f6cbac5e5a47d7f",
         "completed_at": "2026-04-29T20:20:59Z"
+      },
+      "upgrade-alpha": {
+        "status": "success",
+        "coverage_policy": "alpha-webhook-signoff-v2",
+        "run_id": "25131983335",
+        "run_url": "https://github.com/brudnak/ha-rancher-rke2/actions/runs/25131983335",
+        "workflow": "Run Alpha/Webhook Sign-Off",
+        "lane": "upgrade-alpha",
+        "release_line": "v2.14",
+        "target_version": "v2.14.1-alpha12",
+        "previous_version": "v2.14.0",
+        "install_rancher": "v2.14.0",
+        "upgrade_to_rancher": "v2.14.1-alpha12",
+        "webhook_changed": true,
+        "webhook_image": "stgregistry.suse.com/rancher/rancher-webhook:v0.10.4-rc.1",
+        "previous_webhook_build": "109.0.0+up0.10.0",
+        "previous_webhook_tag": "v0.10.0",
+        "target_webhook_build": "109.0.1+up0.10.4-rc.1",
+        "target_webhook_tag": "v0.10.4-rc.1",
+        "signing_policy": "report-only",
+        "signing_registry": "stgregistry.suse.com",
+        "signing_verification": {
+          "target_version": "v2.14.1-alpha12",
+          "webhook_image": "stgregistry.suse.com/rancher/rancher-webhook:v0.10.4-rc.1",
+          "signing_policy": "report-only",
+          "tool": "slsactl",
+          "enforced": false,
+          "signature_verified": true,
+          "provenance_verified": true,
+          "sbom_verified": true,
+          "claim_types": [
+            "https://sigstore.dev/cosign/sign/v1",
+            "https://slsa.dev/provenance/v1"
+          ],
+          "verified_at": "2026-04-29T20:28:25Z"
+        },
+        "rancher_install_resolution": {
+          "phase": "install",
+          "ha_index": 1,
+          "requested_version": "2.14.0",
+          "requested_distro": "auto",
+          "build_type": "release",
+          "resolved_distro": "community",
+          "chart_repo_alias": "rancher-latest",
+          "chart_version": "2.14.0",
+          "chart_source": "rancher-latest/rancher@2.14.0",
+          "compatibility_baseline": "2.14.0",
+          "recommended_rke2_version": "v1.34.6+rke2r3",
+          "resolution_notes": [
+            "Released build requested in auto mode, favoring Prime/staging chart sources before community charts",
+            "Using released community Rancher chart/image defaults",
+            "Using current image.registry/image.repository/image.tag chart values for rancher-latest/rancher@2.14.0",
+            "Support matrix certifies RKE2 from v1.32 through v1.34",
+            "Selected v1.34.6+rke2r3 as the latest available RKE2 patch in the supported v1.34 line"
+          ]
+        },
+        "rancher_upgrade_resolution": {
+          "phase": "upgrade",
+          "ha_index": 1,
+          "requested_version": "2.14.1-alpha12",
+          "requested_distro": "auto",
+          "build_type": "alpha",
+          "resolved_distro": "community-staging",
+          "chart_repo_alias": "optimus-rancher-alpha",
+          "chart_version": "2.14.1-alpha12",
+          "chart_source": "optimus-rancher-alpha/rancher@2.14.1-alpha12",
+          "rancher_image": "stgregistry.suse.com/rancher/rancher",
+          "rancher_image_tag": "v2.14.1-alpha12",
+          "agent_image": "stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha12",
+          "compatibility_baseline": "2.14.0",
+          "recommended_rke2_version": "v1.34.6+rke2r3",
+          "resolution_notes": [
+            "Alpha build requested in auto mode, favoring Prime/staging chart sources before community charts",
+            "Using exact chart match optimus-rancher-alpha/rancher@2.14.1-alpha12 with explicit staging Rancher image overrides",
+            "Using staging Rancher images because the requested version is not a standard released community build",
+            "Using 2.14.0 as the latest released compatibility baseline for the 2.14 release line",
+            "Using current image.registry/image.repository/image.tag chart values for optimus-rancher-alpha/rancher@2.14.1-alpha12",
+            "Support matrix certifies RKE2 from v1.32 through v1.34",
+            "Selected v1.34.6+rke2r3 as the latest available RKE2 patch in the supported v1.34 line"
+          ]
+        },
+        "commit_sha": "48c442524b0830965129e87580b941d9413599eb",
+        "completed_at": "2026-04-29T21:03:35Z"
       }
     },
     "v2.14.1-alpha7": {
