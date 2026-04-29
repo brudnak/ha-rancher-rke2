@@ -139,7 +139,6 @@ jobs:
 
       - name: Build automation tools
         run: |
-          chmod +x .github/scripts/run-with-cancel-cleanup.sh
           go build -o "$RUNNER_TEMP/signoff-plan" ./automation/signoff-plan
           go build -o "$RUNNER_TEMP/signoff-ledger" ./automation/signoff-ledger
           go build -o "$RUNNER_TEMP/render-tool-config" ./automation/render-tool-config
