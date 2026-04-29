@@ -523,6 +523,66 @@
         "commit_sha": "07cdca412cbccceacd3ff9a2e3b671b7e3889090",
         "completed_at": "2026-04-29T07:01:27Z"
       },
+      "previous-with-candidate-webhook": {
+        "status": "success",
+        "coverage_policy": "alpha-webhook-signoff-v2",
+        "run_id": "25095378474",
+        "run_url": "https://github.com/brudnak/ha-rancher-rke2/actions/runs/25095378474",
+        "workflow": "Run Alpha/Webhook Sign-Off",
+        "lane": "previous-with-candidate-webhook",
+        "release_line": "v2.12",
+        "target_version": "v2.12.9-alpha7",
+        "previous_version": "v2.12.8",
+        "install_rancher": "v2.12.8",
+        "webhook_changed": true,
+        "webhook_image": "stgregistry.suse.com/rancher/rancher-webhook:v0.8.6-rc.1",
+        "webhook_override_image": "stgregistry.suse.com/rancher/rancher-webhook:v0.8.6-rc.1",
+        "previous_webhook_build": "107.0.5+up0.8.5",
+        "previous_webhook_tag": "v0.8.5",
+        "target_webhook_build": "107.0.6+up0.8.6-rc.1",
+        "target_webhook_tag": "v0.8.6-rc.1",
+        "signing_policy": "report-only",
+        "signing_registry": "stgregistry.suse.com",
+        "signing_verification": {
+          "target_version": "v2.12.9-alpha7",
+          "webhook_image": "stgregistry.suse.com/rancher/rancher-webhook:v0.8.6-rc.1",
+          "signing_policy": "report-only",
+          "tool": "slsactl",
+          "enforced": false,
+          "signature_verified": true,
+          "provenance_verified": true,
+          "sbom_verified": true,
+          "claim_types": [
+            "https://sigstore.dev/cosign/sign/v1",
+            "https://slsa.dev/provenance/v1"
+          ],
+          "verified_at": "2026-04-29T07:02:56Z"
+        },
+        "rancher_install_resolution": {
+          "phase": "install",
+          "ha_index": 1,
+          "requested_version": "2.12.8",
+          "requested_distro": "auto",
+          "build_type": "release",
+          "resolved_distro": "community",
+          "chart_repo_alias": "rancher-prime",
+          "chart_version": "2.12.8",
+          "chart_source": "rancher-prime/rancher@2.12.8",
+          "rancher_image": "registry.rancher.com/rancher/rancher",
+          "compatibility_baseline": "2.12.8",
+          "recommended_rke2_version": "v1.33.10+rke2r3",
+          "resolution_notes": [
+            "Released build requested in auto mode, favoring Prime/staging chart sources before community charts",
+            "Using Prime chart and Prime Rancher image for released version 2.12.8",
+            "Using released community Rancher chart/image defaults",
+            "Using current image.registry/image.repository/image.tag chart values for rancher-prime/rancher@2.12.8",
+            "Support matrix certifies RKE2 from v1.31 through v1.33",
+            "Selected v1.33.10+rke2r3 as the latest available RKE2 patch in the supported v1.33 line"
+          ]
+        },
+        "commit_sha": "6825f5afe437bdbb07328feba5814e01a1ad91a5",
+        "completed_at": "2026-04-29T07:30:20Z"
+      },
       "upgrade-alpha": {
         "status": "success",
         "coverage_policy": "alpha-webhook-signoff-v2",
