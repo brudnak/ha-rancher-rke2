@@ -14,19 +14,14 @@ func TestHaSetup(t *testing.T) {
 	requireExplicitLifecycleTest(t, "TestHaSetup")
 	setupConfig(t)
 
-	if err := maybeEditAutoModePreflight(); err != nil {
-		t.Fatalf("Failed during Rancher preflight editor: %v", err)
+	resolvedPlans, err := resolveRancherSetup()
+	if err != nil {
+		t.Fatalf("Rancher setup canceled or failed: %v", err)
 	}
-	setupConfig(t)
 
 	totalHAs := viper.GetInt("total_has")
 	if totalHAs < 1 {
 		t.Fatal("total_has must be at least 1")
-	}
-
-	resolvedPlans, err := prepareRancherConfiguration(totalHAs)
-	if err != nil {
-		t.Fatalf("Failed to prepare Rancher configuration: %v", err)
 	}
 
 	helmCommands := viper.GetStringSlice("rancher.helm_commands")
@@ -51,9 +46,6 @@ func TestHaSetup(t *testing.T) {
 		t.Fatalf("RKE2 installer checksum preflight failed before provisioning infrastructure: %v", err)
 	}
 
-	if err := confirmResolvedPlans(resolvedPlans); err != nil {
-		t.Fatalf("Canceled before provisioning infrastructure: %v", err)
-	}
 	for i, plan := range resolvedPlans {
 		if err := writeRancherResolutionArtifact("install", i+1, plan); err != nil {
 			t.Fatalf("Failed to write Rancher install resolution artifact: %v", err)
