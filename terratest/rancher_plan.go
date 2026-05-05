@@ -340,7 +340,7 @@ func chooseRancherSourceCandidates(requestedDistro, buildType string) ([]string,
 	case "community":
 		switch buildType {
 		case "head":
-			return []string{"optimus-rancher-latest"}, "community-staging", []string{"Head build requested, using community staging chart sources"}
+			return []string{"rancher-latest", "optimus-rancher-latest"}, "community", []string{"Head build requested, using community chart and image sources"}
 		case "alpha":
 			return []string{"optimus-rancher-alpha", "optimus-rancher-latest", "rancher-alpha", "rancher-latest"}, "community-staging", []string{"Alpha build requested, trying community alpha/staging chart sources first"}
 		case "rc":
@@ -351,7 +351,7 @@ func chooseRancherSourceCandidates(requestedDistro, buildType string) ([]string,
 	default:
 		switch buildType {
 		case "head":
-			return []string{"rancher-prime", "optimus-rancher-latest", "rancher-latest"}, "community-staging", []string{"Head build requested in auto mode, favoring Prime/staging chart sources before community charts"}
+			return []string{"rancher-latest", "optimus-rancher-latest", "rancher-prime"}, "community", []string{"Head build requested in auto mode, favoring community chart and image sources"}
 		case "alpha":
 			return []string{"rancher-prime", "optimus-rancher-alpha", "optimus-rancher-latest", "rancher-alpha", "rancher-latest"}, "community-staging", []string{"Alpha build requested in auto mode, favoring Prime/staging chart sources before community charts"}
 		case "rc":

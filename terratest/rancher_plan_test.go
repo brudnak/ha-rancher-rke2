@@ -78,6 +78,17 @@ func TestChooseRancherSourceCandidatesAutoPrefersPrimeAndStagingBeforeCommunity(
 	}
 }
 
+func TestChooseRancherSourceCandidatesAutoHeadPrefersCommunity(t *testing.T) {
+	candidates, distro, _ := chooseRancherSourceCandidates("auto", "head")
+	want := []string{"rancher-latest", "optimus-rancher-latest", "rancher-prime"}
+	if strings.Join(candidates, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected %v, got %v", want, candidates)
+	}
+	if distro != "community" {
+		t.Fatalf("expected head to resolve as community, got %q", distro)
+	}
+}
+
 func TestChooseRancherSourceCandidatesAutoReleasePrefersPrimeBeforeCommunity(t *testing.T) {
 	candidates, _, _ := chooseRancherSourceCandidates("auto", "release")
 	want := []string{"rancher-prime", "optimus-rancher-latest", "rancher-latest"}
@@ -124,6 +135,11 @@ func TestResolveImageSettingsAllowsMixedReleaseAndAlphaSources(t *testing.T) {
 	}
 	if alphaAgent != "stgregistry.suse.com/rancher/rancher-agent:v2.14.1-alpha7" {
 		t.Fatalf("expected staging agent image for alpha, got %q", alphaAgent)
+	}
+
+	headImage, headTag, headAgent, _ := resolveImageSettings("2.14-head", "head", "community")
+	if headImage != "" || headTag != "v2.14-head" || headAgent != "" {
+		t.Fatalf("expected community head to use chart image with tag override only, got image=%q tag=%q agent=%q", headImage, headTag, headAgent)
 	}
 }
 
@@ -286,6 +302,43 @@ func TestBuildAutoHelmCommandsCanUseCommunityAlphaImageFallback(t *testing.T) {
 	}
 	if strings.Contains(command, "stgregistry.suse.com") || strings.Contains(command, "CATTLE_AGENT_IMAGE") {
 		t.Fatalf("expected community fallback command not to include staging overrides, got:\n%s", command)
+	}
+}
+
+func TestBuildAutoHelmCommandsCommunityHeadDoesNotOverrideAgentImage(t *testing.T) {
+	commands := buildAutoHelmCommands(
+		1,
+		rancherHelmOperationInstall,
+		"rancher-latest",
+		"2.14.1",
+		"admin",
+		"",
+		"v2.14-head",
+		"",
+		true,
+	)
+
+	command := commands[0]
+	expectedSnippets := []string{
+		"helm install rancher rancher-latest/rancher",
+		"--version 2.14.1",
+		"--set image.tag=v2.14-head",
+	}
+
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(command, snippet) {
+			t.Fatalf("expected helm command to contain %q, got:\n%s", snippet, command)
+		}
+	}
+	forbiddenSnippets := []string{
+		"rancher-agent:v2.14-head",
+		"CATTLE_AGENT_IMAGE",
+		"stgregistry.suse.com",
+	}
+	for _, snippet := range forbiddenSnippets {
+		if strings.Contains(command, snippet) {
+			t.Fatalf("expected community head command not to contain %q, got:\n%s", snippet, command)
+		}
 	}
 }
 
