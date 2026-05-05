@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 func TestPreviousRancherMinorLine(t *testing.T) {
@@ -94,6 +96,28 @@ func TestChooseRancherSourceCandidatesAutoReleasePrefersPrimeBeforeCommunity(t *
 	want := []string{"rancher-prime", "optimus-rancher-latest", "rancher-latest"}
 	if strings.Join(candidates, ",") != strings.Join(want, ",") {
 		t.Fatalf("expected %v, got %v", want, candidates)
+	}
+}
+
+func TestRancherModeInfersAutoFromVersionsWithoutHelmCommands(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	viper.Set("rancher.versions", []string{"2.14-head"})
+
+	if mode := rancherMode(); mode != "auto" {
+		t.Fatalf("expected auto mode for Rancher versions without Helm commands, got %q", mode)
+	}
+}
+
+func TestRancherModeKeepsManualDefaultForHelmCommands(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	viper.Set("rancher.helm_commands", []string{"helm install rancher rancher-latest/rancher"})
+
+	if mode := rancherMode(); mode != "manual" {
+		t.Fatalf("expected manual mode for Helm commands without explicit mode, got %q", mode)
 	}
 }
 

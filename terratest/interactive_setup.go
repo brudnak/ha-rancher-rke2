@@ -57,7 +57,7 @@ type interactiveServer struct {
 }
 
 func resolveRancherSetup() ([]*RancherResolvedPlan, error) {
-	mode := strings.ToLower(strings.TrimSpace(viper.GetString("rancher.mode")))
+	mode := rancherMode()
 	autoApprove := viper.GetBool("rancher.auto_approve")
 
 	if mode == "auto" && !autoApprove {

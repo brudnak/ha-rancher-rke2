@@ -28,7 +28,7 @@ var rancherRegistryHTTPClient = http.DefaultClient
 var rancherRegistryBaseURLs = map[string]string{}
 
 func prepareRancherConfiguration(totalHAs int) ([]*RancherResolvedPlan, error) {
-	mode := strings.ToLower(strings.TrimSpace(viper.GetString("rancher.mode")))
+	mode := rancherMode()
 	switch mode {
 	case "", "manual":
 		return prepareManualRKE2Plans(totalHAs)
@@ -47,6 +47,31 @@ func prepareRancherConfiguration(totalHAs int) ([]*RancherResolvedPlan, error) {
 	default:
 		return nil, fmt.Errorf("unsupported rancher.mode %q", mode)
 	}
+}
+
+func rancherMode() string {
+	mode := strings.ToLower(strings.TrimSpace(viper.GetString("rancher.mode")))
+	if mode != "" {
+		return mode
+	}
+
+	if hasRequestedRancherVersions() && len(viper.GetStringSlice("rancher.helm_commands")) == 0 {
+		return "auto"
+	}
+
+	return "manual"
+}
+
+func hasRequestedRancherVersions() bool {
+	if strings.TrimSpace(viper.GetString("rancher.version")) != "" {
+		return true
+	}
+	for _, version := range viper.GetStringSlice("rancher.versions") {
+		if strings.TrimSpace(version) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func prepareManualRKE2Plans(totalHAs int) ([]*RancherResolvedPlan, error) {
@@ -301,7 +326,7 @@ func rke2ChecksumForVersion(version string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("rke2.install_script_sha256s.%s must be set", version)
+	return "", fmt.Errorf("rancher.mode=manual requires pinned RKE2 installer checksums; set rke2.install_script_sha256s.%s or use rancher.mode=auto to resolve the RKE2 version and checksum automatically", version)
 }
 
 func normalizeVersionInput(value string) string {

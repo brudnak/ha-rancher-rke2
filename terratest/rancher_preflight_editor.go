@@ -17,7 +17,7 @@ import (
 )
 
 func maybeEditAutoModePreflight() error {
-	mode := strings.ToLower(strings.TrimSpace(viper.GetString("rancher.mode")))
+	mode := rancherMode()
 	if mode != "auto" {
 		return nil
 	}
