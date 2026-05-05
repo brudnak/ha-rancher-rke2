@@ -50,6 +50,20 @@ func TestFindLatestMinorReleaseErrorsWithoutGA(t *testing.T) {
 	}
 }
 
+func TestParseHelmSearchResultsSkipsLeadingWarnings(t *testing.T) {
+	output := []byte(`WARNING: Kubernetes configuration file is group-readable. This is insecure.
+WARNING: Kubernetes configuration file is world-readable. This is insecure.
+[{"name":"rancher-latest/rancher","version":"2.14.1","app_version":"v2.14.1"}]`)
+
+	results, err := parseHelmSearchResults(output)
+	if err != nil {
+		t.Fatalf("expected helm search results despite leading warnings, got error: %v", err)
+	}
+	if len(results) != 1 || results[0].Name != "rancher-latest/rancher" || results[0].Version != "2.14.1" {
+		t.Fatalf("unexpected helm search results: %#v", results)
+	}
+}
+
 func TestPrereleaseChartClassification(t *testing.T) {
 	if !isExactStagingPrereleaseChart("optimus-rancher-alpha") {
 		t.Fatal("expected optimus alpha charts to be staging prerelease charts")

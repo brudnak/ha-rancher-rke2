@@ -580,8 +580,8 @@ func searchHelmRepoVersions(repoAlias string) ([]helmSearchResult, error) {
 		return nil, fmt.Errorf("failed to query helm repo %s: %w", repoAlias, err)
 	}
 
-	var results []helmSearchResult
-	if err := json.Unmarshal(output, &results); err != nil {
+	results, err := parseHelmSearchResults(output)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse helm search results for %s: %w", repoAlias, err)
 	}
 	if len(results) > 0 {
@@ -608,9 +608,30 @@ func searchAllHelmRepoVersions() ([]helmSearchResult, error) {
 		return nil, fmt.Errorf("failed to query helm repo globally for rancher charts: %w", err)
 	}
 
-	var results []helmSearchResult
-	if err := json.Unmarshal(output, &results); err != nil {
+	results, err := parseHelmSearchResults(output)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse global helm search results: %w", err)
+	}
+	return results, nil
+}
+
+func parseHelmSearchResults(output []byte) ([]helmSearchResult, error) {
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty helm search output")
+	}
+
+	if !strings.HasPrefix(trimmed, "[") {
+		jsonStart := strings.Index(trimmed, "[")
+		if jsonStart < 0 {
+			return nil, fmt.Errorf("helm search output did not contain a JSON array")
+		}
+		trimmed = strings.TrimSpace(trimmed[jsonStart:])
+	}
+
+	var results []helmSearchResult
+	if err := json.Unmarshal([]byte(trimmed), &results); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
