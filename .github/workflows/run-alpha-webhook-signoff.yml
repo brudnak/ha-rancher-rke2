@@ -143,6 +143,7 @@ jobs:
           go build -o "$RUNNER_TEMP/signoff-ledger" ./automation/signoff-ledger
           go build -o "$RUNNER_TEMP/render-tool-config" ./automation/render-tool-config
           go build -o "$RUNNER_TEMP/render-signoff-report" ./automation/render-signoff-report
+          go build -o "$RUNNER_TEMP/sanitize-smoke-artifacts" ./automation/sanitize-smoke-artifacts
           go build -o "$RUNNER_TEMP/verify-webhook-signing" ./automation/verify-webhook-signing
 
       - name: Generate sign-off plan
@@ -516,17 +517,21 @@ jobs:
             -lane "${{ inputs.lane }}" \
             -output automation-output/signoff-report.md
 
-      - name: Upload smoke artifacts
+      - name: Prepare public smoke artifacts
+        id: public_artifacts
         if: always()
+        run: |
+          "$RUNNER_TEMP/sanitize-smoke-artifacts" \
+            -source "$GITHUB_WORKSPACE" \
+            -output public-smoke-artifacts
+
+      - name: Upload smoke artifacts
+        if: ${{ always() && steps.public_artifacts.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ inputs.lane }}-smoke
           path: |
-            signoff-plan.json
-            lane.env
-            automation-output/signoff-report.md
-            automation-output/*.json
-            test-results/*.xml
+            public-smoke-artifacts/**
 
       - name: Record successful sign-off lane
         if: ${{ success() && inputs.run_rancher_tests == true }}

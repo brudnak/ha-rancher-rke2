@@ -26,7 +26,8 @@ func TestRenderReportIncludesNonSecretMetadata(t *testing.T) {
   "deployment": "rancher-webhook",
   "container": "rancher-webhook",
   "previous_image": "old",
-  "candidate_image": "new"
+  "candidate_image": "new",
+  "rollout_complete": true
 }`)
 	mustWrite(t, filepath.Join(dir, "rancher-test-results.json"), `{
   "repo": "https://github.com/rancher/tests.git",
@@ -72,9 +73,14 @@ func TestRenderReportIncludesNonSecretMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"# v2.14.1-alpha6 Sign-Off Report", "`ha-test`", "`c-m-abc`", "`stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5`", "## Webhook Signing", "`no signatures found`", "## Rancher Test Results", "`charts-webhook`", "`success`"} {
+	for _, want := range []string{"# v2.14.1-alpha6 Sign-Off Report", "`v1.33.4+k3s1`", "`stgregistry.suse.com/rancher/rancher-webhook:v0.10.1-rc.5`", "## Webhook Signing", "`no signatures found`", "## Rancher Test Results", "`charts-webhook`", "`success`"} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("expected report to contain %q:\n%s", want, report)
+		}
+	}
+	for _, omitted := range []string{"`ha-test`", "`c-m-abc`", "https://github.com/rancher/tests.git", "`cattle-system`", "`rancher-webhook`", "`old`", "`new`"} {
+		if strings.Contains(report, omitted) {
+			t.Fatalf("expected report to omit %q:\n%s", omitted, report)
 		}
 	}
 }

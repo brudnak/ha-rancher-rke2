@@ -73,8 +73,10 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build sign-off planner
-        run: go build -o "$RUNNER_TEMP/signoff-plan" ./automation/signoff-plan
+      - name: Build automation tools
+        run: |
+          go build -o "$RUNNER_TEMP/signoff-plan" ./automation/signoff-plan
+          go build -o "$RUNNER_TEMP/sanitize-smoke-artifacts" ./automation/sanitize-smoke-artifacts
 
       - name: Generate sign-off plan
         env:
@@ -308,15 +310,18 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload plan artifact
+      - name: Prepare public plan artifact
+        id: public_artifacts
         if: ${{ always() && hashFiles('signoff-plan.json') != '' }}
+        run: |
+          "$RUNNER_TEMP/sanitize-smoke-artifacts" \
+            -source "$GITHUB_WORKSPACE" \
+            -output public-plan-artifacts
+
+      - name: Upload plan artifact
+        if: ${{ always() && steps.public_artifacts.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signoff-plan
           path: |
-            signoff-plan.json
-            automation-output/signoff-dispatch-queue.json
-            automation-output/signoff-dispatch-selected.json
-            automation-output/signoff-active-runners.json
-            automation-output/signoff-dispatch-summary.json
-            automation-output/signoff-dispatch-results.json
+            public-plan-artifacts/**
