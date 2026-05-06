@@ -79,11 +79,6 @@ variable "custom_hostname_prefix" {
   type        = string
   description = "Optional custom Rancher DNS label. When set, total_has must be 1."
   default     = ""
-
-  validation {
-    condition     = trimspace(var.custom_hostname_prefix) == "" || var.total_has == 1
-    error_message = "custom_hostname_prefix can only be used when total_has is 1."
-  }
 }
 
 # Module configuration

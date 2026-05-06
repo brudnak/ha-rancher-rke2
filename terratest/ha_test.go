@@ -30,6 +30,9 @@ func TestHaSetup(t *testing.T) {
 	if err := settings.ValidateAWSPemKeyNameConfig(); err != nil {
 		t.Fatalf("AWS PEM key preflight failed: %v", err)
 	}
+	if err := settings.ValidateCustomHostnameConfig(totalHAs); err != nil {
+		t.Fatalf("Custom Rancher URL preflight failed: %v", err)
+	}
 
 	helmCommands := viper.GetStringSlice("rancher.helm_commands")
 	if len(helmCommands) != totalHAs {
