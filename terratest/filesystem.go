@@ -42,6 +42,10 @@ func cleanupTerraformFiles() {
 	RemoveFolder("../modules/aws/.terraform")
 }
 
+func cleanupAutomationOutput() {
+	RemoveFolder(automationOutputDir())
+}
+
 func automationOutputDir() string {
 	if workspace := strings.TrimSpace(os.Getenv("GITHUB_WORKSPACE")); workspace != "" {
 		return filepath.Join(workspace, "automation-output")

@@ -130,6 +130,7 @@ func TestHACleanup(t *testing.T) {
 		cleanupHAInstance(i)
 	}
 	cleanupTerraformFiles()
+	cleanupAutomationOutput()
 
 	if costEstimate != nil {
 		logCleanupCostEstimate(costEstimate)

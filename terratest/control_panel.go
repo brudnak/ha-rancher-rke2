@@ -543,12 +543,15 @@ func (p *localControlPanel) discoverDownstreamClusters(local clusterView, record
 	}
 
 	recordByName := downstreamRecordsByClusterKey(records)
+	activeIDs := map[string]bool{}
 	clusters := make([]clusterView, 0, len(provisioningClusters))
 	for _, item := range provisioningClusters {
 		key := provisioningClusterRecordKey(item.Namespace, item.Name)
 		record := recordByName[key]
+		clusterID := downstreamClusterID(local.HAIndex, item.Namespace, item.Name)
+		activeIDs[clusterID] = true
 		cluster := clusterView{
-			ID:                  downstreamClusterID(local.HAIndex, item.Namespace, item.Name),
+			ID:                  clusterID,
 			Type:                "downstream",
 			HAIndex:             local.HAIndex,
 			Name:                item.Name,
@@ -589,6 +592,7 @@ func (p *localControlPanel) discoverDownstreamClusters(local clusterView, record
 		cluster.Pods = pods
 		clusters = append(clusters, cluster)
 	}
+	p.pruneStaleDownstreamKubeconfigs(local.HAIndex, activeIDs)
 
 	return clusters
 }
@@ -755,6 +759,40 @@ func safeKubeconfigDownloadName(clusterName string) string {
 		name = "downstream"
 	}
 	return name + ".yaml"
+}
+
+func (p *localControlPanel) pruneStaleDownstreamKubeconfigs(haIndex int, activeIDs map[string]bool) {
+	prefix := fmt.Sprintf("ha-%d-downstream-", haIndex)
+
+	p.mu.Lock()
+	for clusterID, path := range p.downstreamKubeconfigCache {
+		if !strings.HasPrefix(clusterID, prefix) || activeIDs[clusterID] {
+			continue
+		}
+		delete(p.downstreamKubeconfigCache, clusterID)
+		RemoveFile(path)
+	}
+	p.mu.Unlock()
+
+	cacheDir := filepath.Join(automationOutputDir(), "control-panel")
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || filepath.Ext(name) != ".yaml" {
+			continue
+		}
+		clusterID := strings.TrimSuffix(name, ".yaml")
+		if activeIDs[clusterID] {
+			continue
+		}
+		RemoveFile(filepath.Join(cacheDir, name))
+	}
 }
 
 func fetchLocalRancherPods(kubeconfigPath string) ([]podView, error) {
