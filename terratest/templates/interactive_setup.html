@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rancher HA Setup</title>
+  <script>
+    window.tailwind = window.tailwind || {}
+    window.tailwind.config = { darkMode: 'class' }
+    const savedTheme = localStorage.getItem('rancherSetupTheme')
+    const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+    document.documentElement.classList.toggle('dark', savedTheme ? savedTheme === 'dark' : systemDark)
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class' }
+  </script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible {
+      outline: 2px solid rgb(16 185 129);
+      outline-offset: 2px;
+    }
+    .advanced-summary:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 2px rgb(16 185 129);
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.94em;
+    }
+    section[data-section] { display: none; }
+    body[data-phase="editor"] section[data-section="editor"] { display: block; }
+    body[data-phase="resolving"] section[data-section="resolving"] { display: block; }
+    body[data-phase="review"] section[data-section="review"] { display: block; }
+    body[data-phase="done"] section[data-section="done"] { display: block; }
+    summary::-webkit-details-marker { display: none; }
+    details[open] .advanced-toggle-track {
+      background: rgb(16 185 129);
+    }
+    details[open] .advanced-toggle-knob {
+      transform: translateX(1.25rem);
+    }
+    .custom-hostname[data-enabled="false"] .hostname-control,
+    .custom-hostname[data-enabled="false"] .hostname-help { display: none; }
+    .spinner {
+      width: 22px;
+      height: 22px;
+      border: 3px solid rgb(228 228 231);
+      border-top-color: rgb(16 185 129);
+      border-radius: 999px;
+      animation: spin 0.85s linear infinite;
+      flex-shrink: 0;
+    }
+    .dark .spinner {
+      border-color: rgba(255, 255, 255, 0.12);
+      border-top-color: rgb(16 185 129);
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body data-phase="editor" class="min-h-screen bg-zinc-100 text-zinc-950 antialiased dark:bg-zinc-950 dark:text-zinc-100">
+  <main class="min-h-screen px-4 py-10 sm:px-6 lg:px-8">
+    <div class="mx-auto max-w-4xl">
+      <section data-section="editor">
+        <div class="mb-6 flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <div class="mb-4 inline-flex items-center rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs font-medium text-zinc-500 shadow-sm dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
+              Interactive setup
+            </div>
+            <h1 class="text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50 sm:text-3xl">Rancher HA Setup Preflight</h1>
+            <p class="mt-3 max-w-3xl text-sm font-normal leading-6 text-zinc-600 dark:text-zinc-400 sm:text-base">
+              Review the requested Rancher versions for this run. The row count becomes <code>total_has</code> automatically. After you resolve, this same page will show the final plan for approval.
+            </p>
+          </div>
+          <button id="themeToggle" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white px-3.5 py-2 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200 dark:hover:bg-white/[0.1]" aria-label="Toggle color theme">
+            <svg id="themeSunIcon" xmlns="http://www.w3.org/2000/svg" class="hidden h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path d="M12 2v2"></path>
+              <path d="M12 20v2"></path>
+              <path d="m4.93 4.93 1.41 1.41"></path>
+              <path d="m17.66 17.66 1.41 1.41"></path>
+              <path d="M2 12h2"></path>
+              <path d="M20 12h2"></path>
+              <path d="m6.34 17.66-1.41 1.41"></path>
+              <path d="m19.07 4.93-1.41 1.41"></path>
+            </svg>
+            <svg id="themeMoonIcon" xmlns="http://www.w3.org/2000/svg" class="hidden h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"></path>
+            </svg>
+            <span id="themeToggleLabel">Theme</span>
+          </button>
+        </div>
+
+        <form id="setupForm" method="post" action="/submit?token={{.Token}}" hx-post="/submit?token={{.Token}}" hx-trigger="confirmed-submit" hx-swap="none">
+          <div class="rounded-2xl border border-zinc-200 bg-white p-4 shadow-xl shadow-zinc-200/60 dark:border-white/10 dark:bg-zinc-900/80 dark:shadow-black/30 sm:p-5">
+              <div class="mb-3 flex items-center justify-between gap-3">
+                <h2 class="text-sm font-semibold text-zinc-950 dark:text-zinc-100">Rancher versions</h2>
+                <button class="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:cursor-default disabled:opacity-60 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-200 dark:hover:bg-white/[0.08]" id="addBtn" type="button">Add HA</button>
+              </div>
+              <div class="grid gap-2" id="rows"></div>
+              <div class="mx-2 mt-3 text-sm font-normal text-zinc-500 dark:text-zinc-400">
+                Examples: 2.14-head, v2.14-head, or head. Leading v is stripped when saved.
+              </div>
+
+              <div class="custom-hostname mt-5 grid gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-white/10 dark:bg-white/[0.03]" id="customHostnameBox" data-enabled="false">
+                <label class="flex cursor-pointer items-start justify-between gap-4">
+                  <span>
+                    <span class="block text-sm font-medium text-zinc-950 dark:text-zinc-100">Use a custom Rancher URL</span>
+                    <span class="mt-1 block text-sm font-normal leading-6 text-zinc-600 dark:text-zinc-400">
+                      Creates exactly one HA and uses this DNS label for Rancher. AWS resource names still use <code>aws_prefix</code>.
+                    </span>
+                  </span>
+                  <input id="customHostnameToggle" name="customHostnameEnabled" value="true" type="checkbox" class="peer sr-only" />
+                  <span aria-hidden="true" class="mt-0.5 h-6 w-11 rounded-full bg-zinc-300 ring-1 ring-zinc-300 transition peer-checked:bg-emerald-500 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-emerald-400 after:mt-0.5 after:ml-0.5 after:block after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition peer-checked:after:translate-x-5 dark:bg-zinc-800 dark:ring-white/10"></span>
+                </label>
+                <div class="hostname-control grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                  <input id="customHostnameInput" name="customHostname" type="text" placeholder="foobar" class="w-full rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 font-medium text-zinc-950 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/50 dark:text-zinc-100" />
+                  <div class="text-base font-semibold text-zinc-500 dark:text-zinc-400">.the.example.com</div>
+                </div>
+                <div class="hostname-help text-sm font-normal text-zinc-500 dark:text-zinc-400">
+                  Example: type foobar and Rancher will use foobar.the.example.com.
+                </div>
+              </div>
+
+              <div class="mt-6 rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-white/10 dark:bg-white/[0.03]">
+                <div class="mb-4">
+                  <h2 class="text-base font-semibold text-zinc-950 dark:text-zinc-100">Rancher settings</h2>
+                  <p class="mt-1 text-sm font-normal text-zinc-600 dark:text-zinc-400">Choose the build source and bootstrap behavior for this run.</p>
+                </div>
+                <div class="grid gap-4 lg:grid-cols-2">
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    Distro
+                    <select id="distroSelect" name="distro" class="w-full rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 font-medium text-zinc-950 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/50 dark:text-zinc-100">
+                      <option class="bg-white text-zinc-950 dark:bg-zinc-900 dark:text-zinc-100" value="auto">auto</option>
+                      <option class="bg-white text-zinc-950 dark:bg-zinc-900 dark:text-zinc-100" value="community">community</option>
+                      <option class="bg-white text-zinc-950 dark:bg-zinc-900 dark:text-zinc-100" value="prime">prime</option>
+                    </select>
+                  </label>
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    Bootstrap password
+                    <div class="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                      <input id="bootstrapPasswordInput" name="bootstrapPassword" type="password" autocomplete="off" class="w-full rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 font-medium text-zinc-950 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/50 dark:text-zinc-100" />
+                      <button class="rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-zinc-800 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700" id="bootstrapPasswordToggle" type="button">Show</button>
+                    </div>
+                  </label>
+                  <label class="flex min-h-12 cursor-pointer items-center justify-between gap-4 rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-sm font-medium text-zinc-700 dark:border-white/10 dark:bg-black/20 dark:text-zinc-300">
+                    <span>Preload RKE2 images</span>
+                    <input id="preloadImagesToggle" name="preloadImages" value="true" type="checkbox" class="peer sr-only" />
+                    <span aria-hidden="true" class="h-6 w-11 rounded-full bg-zinc-300 ring-1 ring-zinc-300 transition peer-checked:bg-emerald-500 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-emerald-400 after:mt-0.5 after:ml-0.5 after:block after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition peer-checked:after:translate-x-5 dark:bg-zinc-800 dark:ring-white/10"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-white/10 dark:bg-white/[0.03]">
+                <div class="mb-4">
+                  <h2 class="text-base font-semibold text-zinc-950 dark:text-zinc-100">Basic AWS settings</h2>
+                  <p class="mt-1 text-sm font-normal text-zinc-600 dark:text-zinc-400">These identify the owner and SSH key for the AWS resources.</p>
+                </div>
+                <div class="grid gap-4 lg:grid-cols-2">
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    AWS prefix
+                    <input data-tf-var="aws_prefix" name="tfVars.aws_prefix" type="text" maxlength="3" placeholder="atb" class="w-full rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 font-medium text-zinc-950 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/50 dark:text-zinc-100" />
+                  </label>
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    PEM key name
+                    <input data-tf-var="aws_pem_key_name" name="tfVars.aws_pem_key_name" type="text" class="w-full rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 font-medium text-zinc-950 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/50 dark:text-zinc-100" />
+                  </label>
+                </div>
+                <div class="mt-3 text-sm font-normal text-zinc-500 dark:text-zinc-400">AWS prefix must be 2 or 3 letters, usually your initials.</div>
+              </div>
+
+              <details class="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-white/10 dark:bg-white/[0.03]" id="advancedAwsDetails">
+                <summary class="advanced-summary flex cursor-pointer list-none items-start justify-between gap-4 rounded-lg p-1">
+                  <span>
+                    <span class="block text-base font-semibold text-zinc-950 dark:text-zinc-100">Advanced AWS settings</span>
+                    <span class="mt-1 block text-sm font-normal leading-6 text-zinc-600 dark:text-zinc-400">Most users should not need to change these. Unlock a field only when you know the AWS value needs to change.</span>
+                  </span>
+                  <span aria-hidden="true" class="advanced-toggle-track mt-0.5 h-6 w-11 shrink-0 rounded-full bg-zinc-300 ring-1 ring-zinc-300 transition dark:bg-zinc-800 dark:ring-white/10">
+                    <span class="advanced-toggle-knob mt-0.5 ml-0.5 block h-5 w-5 rounded-full bg-white shadow-sm transition-transform"></span>
+                  </span>
+                </summary>
+                <div class="mt-5 grid gap-4 lg:grid-cols-2">
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    AWS region
+                    <div class="grid grid-cols-[minmax(0,1fr)_44px] gap-2">
+                      <input data-tf-var="aws_region" name="tfVars.aws_region" data-locked-field type="text" placeholder="us-east-2" readonly class="w-full rounded-lg border border-zinc-200 bg-zinc-100 px-3.5 py-2.5 font-medium text-zinc-500 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/30 dark:text-zinc-500" />
+                      <button class="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700" data-lock-toggle="aws_region" data-state="locked" type="button" title="Unlock AWS region" aria-label="Unlock AWS region"></button>
+                    </div>
+                  </label>
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    VPC ID
+                    <div class="grid grid-cols-[minmax(0,1fr)_44px] gap-2">
+                      <input data-tf-var="aws_vpc" name="tfVars.aws_vpc" data-locked-field type="text" readonly class="w-full rounded-lg border border-zinc-200 bg-zinc-100 px-3.5 py-2.5 font-medium text-zinc-500 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/30 dark:text-zinc-500" />
+                      <button class="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700" data-lock-toggle="aws_vpc" data-state="locked" type="button" title="Unlock VPC ID" aria-label="Unlock VPC ID"></button>
+                    </div>
+                  </label>
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    Subnet A
+                    <div class="grid grid-cols-[minmax(0,1fr)_44px] gap-2">
+                      <input data-tf-var="aws_subnet_a" name="tfVars.aws_subnet_a" data-locked-field type="text" readonly class="w-full rounded-lg border border-zinc-200 bg-zinc-100 px-3.5 py-2.5 font-medium text-zinc-500 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/30 dark:text-zinc-500" />
+                      <button class="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700" data-lock-toggle="aws_subnet_a" data-state="locked" type="button" title="Unlock Subnet A" aria-label="Unlock Subnet A"></button>
+                    </div>
+                  </label>
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    Subnet B
+                    <div class="grid grid-cols-[minmax(0,1fr)_44px] gap-2">
+                      <input data-tf-var="aws_subnet_b" name="tfVars.aws_subnet_b" data-locked-field type="text" readonly class="w-full rounded-lg border border-zinc-200 bg-zinc-100 px-3.5 py-2.5 font-medium text-zinc-500 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/30 dark:text-zinc-500" />
+                      <button class="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700" data-lock-toggle="aws_subnet_b" data-state="locked" type="button" title="Unlock Subnet B" aria-label="Unlock Subnet B"></button>
+                    </div>
+                  </label>
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    Subnet C
+                    <div class="grid grid-cols-[minmax(0,1fr)_44px] gap-2">
+                      <input data-tf-var="aws_subnet_c" name="tfVars.aws_subnet_c" data-locked-field type="text" readonly class="w-full rounded-lg border border-zinc-200 bg-zinc-100 px-3.5 py-2.5 font-medium text-zinc-500 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/30 dark:text-zinc-500" />
+                      <button class="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700" data-lock-toggle="aws_subnet_c" data-state="locked" type="button" title="Unlock Subnet C" aria-label="Unlock Subnet C"></button>
+                    </div>
+                  </label>
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    AMI
+                    <div class="grid grid-cols-[minmax(0,1fr)_44px] gap-2">
+                      <input data-tf-var="aws_ami" name="tfVars.aws_ami" data-locked-field type="text" readonly class="w-full rounded-lg border border-zinc-200 bg-zinc-100 px-3.5 py-2.5 font-medium text-zinc-500 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/30 dark:text-zinc-500" />
+                      <button class="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700" data-lock-toggle="aws_ami" data-state="locked" type="button" title="Unlock AMI" aria-label="Unlock AMI"></button>
+                    </div>
+                  </label>
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    Node subnet
+                    <div class="grid grid-cols-[minmax(0,1fr)_44px] gap-2">
+                      <input data-tf-var="aws_subnet_id" name="tfVars.aws_subnet_id" data-locked-field type="text" readonly class="w-full rounded-lg border border-zinc-200 bg-zinc-100 px-3.5 py-2.5 font-medium text-zinc-500 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/30 dark:text-zinc-500" />
+                      <button class="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700" data-lock-toggle="aws_subnet_id" data-state="locked" type="button" title="Unlock Node subnet" aria-label="Unlock Node subnet"></button>
+                    </div>
+                  </label>
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    Security group
+                    <div class="grid grid-cols-[minmax(0,1fr)_44px] gap-2">
+                      <input data-tf-var="aws_security_group_id" name="tfVars.aws_security_group_id" data-locked-field type="text" readonly class="w-full rounded-lg border border-zinc-200 bg-zinc-100 px-3.5 py-2.5 font-medium text-zinc-500 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/30 dark:text-zinc-500" />
+                      <button class="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700" data-lock-toggle="aws_security_group_id" data-state="locked" type="button" title="Unlock Security group" aria-label="Unlock Security group"></button>
+                    </div>
+                  </label>
+                  <label class="grid gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+                    Route53 domain
+                    <div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_44px]">
+                      <input data-tf-var="aws_route53_fqdn" name="tfVars.aws_route53_fqdn" data-locked-field data-secret-field type="password" placeholder="the.example.com" readonly class="w-full rounded-lg border border-zinc-200 bg-zinc-100 px-3.5 py-2.5 font-medium text-zinc-500 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/30 dark:text-zinc-500" />
+                      <button class="rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-zinc-800 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700" data-secret-toggle="aws_route53_fqdn" type="button">Show</button>
+                      <button class="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700" data-lock-toggle="aws_route53_fqdn" data-state="locked" type="button" title="Unlock Route53 domain" aria-label="Unlock Route53 domain"></button>
+                    </div>
+                  </label>
+                </div>
+              </details>
+
+              <div class="mt-5 grid gap-2 text-sm font-normal text-zinc-500 dark:text-zinc-400">
+                <div><strong class="text-zinc-950 dark:text-zinc-100">Total HAs for this run:</strong> <span id="totalInstancesValue"></span></div>
+                <div><strong class="text-zinc-950 dark:text-zinc-100">Config file:</strong> <code>{{.ConfigPath}}</code></div>
+                <div><strong class="text-zinc-950 dark:text-zinc-100">Mode:</strong> auto</div>
+                <div>After you submit, this same page will stream resolver logs and then show the full plan for approval.</div>
+              </div>
+              <div class="mt-4 min-h-6 whitespace-pre-wrap text-sm font-medium text-rose-300" id="editorErrorBox"></div>
+              <div class="mt-2 min-h-6 text-sm font-normal text-zinc-500 dark:text-zinc-400" id="editorStatusBox"></div>
+            </div>
+
+          <div class="mt-4 flex flex-wrap items-center justify-end gap-3">
+            <div class="flex flex-wrap gap-3">
+              <button class="rounded-lg border border-zinc-200 bg-white px-4 py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-200 dark:hover:bg-white/[0.08]" id="editorCancelBtn" type="button">Cancel</button>
+              <button class="rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-emerald-950/30 hover:bg-emerald-400" id="continueBtn" type="button">Resolve Plan</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section data-section="resolving">
+        <div class="rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl shadow-zinc-200/60 dark:border-white/10 dark:bg-zinc-900/80 dark:shadow-black/30 sm:p-6">
+          <div class="flex items-start gap-4">
+            <div class="spinner mt-1" aria-hidden="true"></div>
+            <div>
+              <h1 class="text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50 sm:text-3xl">Resolving Rancher plan</h1>
+              <p class="mt-2 max-w-4xl text-sm font-normal leading-6 text-zinc-600 dark:text-zinc-400 sm:text-base">Fetching Helm repos, SUSE support matrix, RKE2 patch releases, and computing installer SHA256 hashes. Live log stream below.</p>
+            </div>
+          </div>
+          <pre class="mt-5 h-[min(56vh,520px)] overflow-auto rounded-xl border border-zinc-200 bg-zinc-950 p-4 font-mono text-xs leading-6 text-zinc-200 shadow-inner dark:border-white/10" id="logPanel"><span class="text-white/55">Waiting for resolver output...</span></pre>
+          <div class="mt-4 min-h-6 whitespace-pre-wrap text-sm font-medium text-rose-600 dark:text-rose-300" id="resolvingErrorBox"></div>
+        </div>
+      </section>
+
+      <section data-section="review">
+        <div class="rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl shadow-zinc-200/60 dark:border-white/10 dark:bg-zinc-900/80 dark:shadow-black/30 sm:p-6">
+          <h1 class="text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50 sm:text-3xl">Continue with this Rancher HA plan?</h1>
+          <p class="mt-3 max-w-4xl text-sm font-normal leading-6 text-zinc-600 dark:text-zinc-400 sm:text-base">Review the resolved plan below before continuing. Bootstrap passwords are redacted.</p>
+          <div class="mt-5 mb-4 h-[min(52vh,560px)] overflow-auto rounded-xl border border-zinc-200 bg-zinc-50 dark:border-white/10 dark:bg-zinc-950/40">
+            <pre class="whitespace-pre-wrap break-words p-5 font-mono text-xs leading-6 text-zinc-800 dark:text-zinc-200" id="planPanel"></pre>
+          </div>
+          <div class="min-h-6 whitespace-pre-wrap text-sm font-medium text-rose-600 dark:text-rose-300" id="reviewErrorBox"></div>
+          <div class="mt-5 flex flex-wrap justify-end gap-3 border-t border-zinc-200 pt-5 dark:border-white/10" id="respondActions">
+            <button type="button" data-response-action="cancel" class="rounded-lg border border-zinc-200 bg-white px-4 py-2.5 font-semibold text-zinc-700 hover:bg-zinc-100 disabled:cursor-default disabled:opacity-60 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700">Cancel</button>
+            <button type="button" data-response-action="continue" class="rounded-lg bg-emerald-500 px-4 py-2.5 font-semibold text-white shadow-sm shadow-emerald-500/20 hover:bg-emerald-400 disabled:cursor-default disabled:opacity-60">Continue</button>
+          </div>
+        </div>
+      </section>
+
+      <section data-section="done">
+        <div class="flex min-h-[60vh] items-center justify-center">
+          <div class="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-xl shadow-zinc-200/60 dark:border-white/10 dark:bg-zinc-900/80 dark:shadow-black/30">
+            <div id="doneAccent" class="flex h-11 w-11 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
+              <svg id="doneIcon" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M20 6 9 17l-5-5"></path>
+              </svg>
+            </div>
+            <h1 id="doneTitle" class="mt-5 text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">Response recorded</h1>
+            <p id="doneBody" class="mt-3 text-sm leading-6 text-zinc-600 dark:text-zinc-400">You can close this tab. The test run is continuing in your terminal.</p>
+            <div id="doneDetail" class="mt-6 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
+              Setup approval has been handed back to the local run.
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div id="confirmModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-zinc-950/45 p-4 backdrop-blur-sm dark:bg-zinc-950/80" role="dialog" aria-modal="true" aria-labelledby="confirmModalTitle">
+    <div class="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl shadow-zinc-900/20 dark:border-white/10 dark:bg-zinc-900 dark:shadow-black/50">
+      <h2 id="confirmModalTitle" class="text-xl font-semibold text-zinc-950 dark:text-zinc-100"></h2>
+      <p id="confirmModalBody" class="mt-3 text-sm font-normal leading-6 text-zinc-600 dark:text-zinc-300"></p>
+      <div class="mt-6 flex flex-wrap justify-end gap-3">
+        <button id="confirmModalCancel" type="button" class="rounded-lg border border-zinc-200 bg-white px-4 py-2.5 font-semibold text-zinc-700 hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700">Go back</button>
+        <button id="confirmModalConfirm" type="button" class="rounded-lg bg-emerald-500 px-4 py-2.5 font-semibold text-white shadow-sm shadow-emerald-500/20 hover:bg-emerald-400"></button>
+      </div>
+    </div>
+  </div>
+
+  <script type="application/json" id="setup-data">{{.InitialStateJSON}}</script>
+  <script src="/static/interactive_setup.js" defer></script>
+</body>
+</html>

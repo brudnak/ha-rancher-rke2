@@ -75,6 +75,17 @@ variable "aws_route53_fqdn" {
   description = "Route53 FQDN for DNS records"
 }
 
+variable "custom_hostname_prefix" {
+  type        = string
+  description = "Optional custom Rancher DNS label. When set, total_has must be 1."
+  default     = ""
+
+  validation {
+    condition     = trimspace(var.custom_hostname_prefix) == "" || var.total_has == 1
+    error_message = "custom_hostname_prefix can only be used when total_has is 1."
+  }
+}
+
 # Module configuration
 locals {
   ha_instances = { for i in range(1, var.total_has + 1) : i => "${var.aws_prefix}-${i}" }
@@ -84,16 +95,17 @@ module "ha" {
   for_each = local.ha_instances
   source   = "./modules/rke2-ha"
 
-  aws_prefix            = each.value
-  aws_vpc               = var.aws_vpc
-  aws_subnet_a          = var.aws_subnet_a
-  aws_subnet_b          = var.aws_subnet_b
-  aws_subnet_c          = var.aws_subnet_c
-  aws_ami               = var.aws_ami
-  aws_subnet_id         = var.aws_subnet_id
-  aws_security_group_id = var.aws_security_group_id
-  aws_pem_key_name      = var.aws_pem_key_name
-  aws_route53_fqdn      = var.aws_route53_fqdn
+  aws_prefix             = each.value
+  aws_vpc                = var.aws_vpc
+  aws_subnet_a           = var.aws_subnet_a
+  aws_subnet_b           = var.aws_subnet_b
+  aws_subnet_c           = var.aws_subnet_c
+  aws_ami                = var.aws_ami
+  aws_subnet_id          = var.aws_subnet_id
+  aws_security_group_id  = var.aws_security_group_id
+  aws_pem_key_name       = var.aws_pem_key_name
+  aws_route53_fqdn       = var.aws_route53_fqdn
+  custom_hostname_prefix = trimspace(var.custom_hostname_prefix)
 }
 
 # Outputs

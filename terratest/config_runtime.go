@@ -26,7 +26,17 @@ func setupConfig(t *testing.T) {
 }
 
 func getTerraformOptions(t *testing.T, totalHAs int) *terraform.Options {
+	if err := validateAWSPrefixConfig(); err != nil {
+		t.Fatalf("AWS prefix preflight failed: %v", err)
+	}
+	if err := validateAWSPemKeyNameConfig(); err != nil {
+		t.Fatalf("AWS PEM key preflight failed: %v", err)
+	}
 	generateAwsVars()
+	customHostnamePrefix, err := configuredCustomHostnamePrefix()
+	if err != nil {
+		t.Fatalf("Invalid custom Rancher hostname: %v", err)
+	}
 
 	backendConfig, err := terraformBackendConfigFromEnv()
 	if err != nil {
@@ -43,17 +53,18 @@ func getTerraformOptions(t *testing.T, totalHAs int) *terraform.Options {
 		LockTimeout:   "5m",
 		BackendConfig: backendConfig,
 		Vars: map[string]interface{}{
-			"total_has":             totalHAs,
-			"aws_prefix":            viper.GetString("tf_vars.aws_prefix"),
-			"aws_vpc":               viper.GetString("tf_vars.aws_vpc"),
-			"aws_subnet_a":          viper.GetString("tf_vars.aws_subnet_a"),
-			"aws_subnet_b":          viper.GetString("tf_vars.aws_subnet_b"),
-			"aws_subnet_c":          viper.GetString("tf_vars.aws_subnet_c"),
-			"aws_ami":               viper.GetString("tf_vars.aws_ami"),
-			"aws_subnet_id":         viper.GetString("tf_vars.aws_subnet_id"),
-			"aws_security_group_id": viper.GetString("tf_vars.aws_security_group_id"),
-			"aws_pem_key_name":      viper.GetString("tf_vars.aws_pem_key_name"),
-			"aws_route53_fqdn":      viper.GetString("tf_vars.aws_route53_fqdn"),
+			"total_has":              totalHAs,
+			"aws_prefix":             viper.GetString("tf_vars.aws_prefix"),
+			"aws_vpc":                viper.GetString("tf_vars.aws_vpc"),
+			"aws_subnet_a":           viper.GetString("tf_vars.aws_subnet_a"),
+			"aws_subnet_b":           viper.GetString("tf_vars.aws_subnet_b"),
+			"aws_subnet_c":           viper.GetString("tf_vars.aws_subnet_c"),
+			"aws_ami":                viper.GetString("tf_vars.aws_ami"),
+			"aws_subnet_id":          viper.GetString("tf_vars.aws_subnet_id"),
+			"aws_security_group_id":  viper.GetString("tf_vars.aws_security_group_id"),
+			"aws_pem_key_name":       viper.GetString("tf_vars.aws_pem_key_name"),
+			"aws_route53_fqdn":       viper.GetString("tf_vars.aws_route53_fqdn"),
+			"custom_hostname_prefix": customHostnamePrefix,
 		},
 	})
 
@@ -127,6 +138,7 @@ func generateAwsVars() {
 		viper.GetString("tf_vars.aws_security_group_id"),
 		viper.GetString("tf_vars.aws_pem_key_name"),
 		viper.GetString("tf_vars.aws_route53_fqdn"),
+		currentCustomHostnamePrefix(),
 	)
 }
 

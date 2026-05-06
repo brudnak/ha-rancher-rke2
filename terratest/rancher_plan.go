@@ -148,6 +148,12 @@ func resolveAutoRancherPlans(totalHAs int) ([]*RancherResolvedPlan, error) {
 		if err != nil {
 			return nil, err
 		}
+		if minorLine == "" {
+			minorLine, err = rancherMinorLineFromVersion(compatibilityBaseline)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if buildType != "release" && chartRepoAlias == "rancher-prime" {
 			explanation = append(explanation, fmt.Sprintf("Using the latest released Prime chart %s as the baseline chart, then overriding Rancher images to the requested %s build", chartVersion, buildType))
 		}
@@ -332,6 +338,7 @@ func rke2ChecksumForVersion(version string) (string, error) {
 func normalizeVersionInput(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.TrimPrefix(value, "v")
+	value = strings.TrimPrefix(value, "V")
 	return value
 }
 
@@ -342,6 +349,8 @@ func classifyRancherVersion(version string) (buildType string, minorLine string,
 	releasePattern := regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 	switch {
+	case version == "head":
+		return "head", "", nil
 	case headPattern.MatchString(version):
 		parts := strings.Split(version, "-")
 		return "head", parts[0], nil
@@ -388,6 +397,27 @@ func chooseRancherSourceCandidates(requestedDistro, buildType string) ([]string,
 }
 
 func resolveChartAndBaseline(repoCandidates []string, requestedVersion, minorLine, buildType string) (string, string, string, error) {
+	if buildType == "head" && requestedVersion == "head" {
+		for _, repoAlias := range repoCandidates {
+			if repoAlias != "rancher-latest" {
+				continue
+			}
+			results, err := searchHelmRepoVersions(repoAlias)
+			if err != nil {
+				log.Printf("[resolver] Repo candidate %s query failed for Rancher head: %v", repoAlias, err)
+				continue
+			}
+			latestRelease, err := findLatestRelease(results)
+			if err != nil {
+				log.Printf("[resolver] Repo candidate %s inspection for head: latestRelease=<none>", repoAlias)
+				continue
+			}
+			log.Printf("[resolver] Repo candidate %s inspection for head: latestRelease=%s", repoAlias, latestRelease)
+			return repoAlias, latestRelease, latestRelease, nil
+		}
+		return "", "", "", fmt.Errorf("could not resolve the latest rancher-latest chart for head")
+	}
+
 	if globalExactMatch, err := findExactRequestedChartAcrossRepos(repoCandidates, requestedVersion); err == nil {
 		compatibilityBaseline := requestedVersion
 		if buildType != "release" {
@@ -682,6 +712,37 @@ func findLatestMinorRelease(results []helmSearchResult, minorLine string) (strin
 	return candidates[0].Original(), nil
 }
 
+func findLatestRelease(results []helmSearchResult) (string, error) {
+	var candidates []*goversion.Version
+	for _, result := range results {
+		if strings.Contains(result.Version, "-") {
+			continue
+		}
+		parsed, err := goversion.NewVersion(result.Version)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, parsed)
+	}
+
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no released chart version found")
+	}
+
+	slices.SortFunc(candidates, func(a, b *goversion.Version) int {
+		return b.Compare(a)
+	})
+	return candidates[0].Original(), nil
+}
+
+func rancherMinorLineFromVersion(version string) (string, error) {
+	parts := strings.Split(strings.TrimSpace(version), ".")
+	if len(parts) < 2 {
+		return "", fmt.Errorf("could not derive Rancher minor line from %q", version)
+	}
+	return strings.Join(parts[:2], "."), nil
+}
+
 func resolveImageSettings(requestedVersion, buildType, resolvedDistro string) (string, string, string, []string) {
 	switch resolvedDistro {
 	case "prime":
@@ -696,6 +757,9 @@ func resolveImageSettings(requestedVersion, buildType, resolvedDistro string) (s
 	default:
 		if buildType == "release" {
 			return "", "", "", []string{"Using released community Rancher chart/image defaults"}
+		}
+		if requestedVersion == "head" {
+			return "", "head", "", []string{"Using released community Rancher chart with the Docker Hub rancher/rancher:head image tag"}
 		}
 		return "", "v" + requestedVersion, "", []string{"Using released community Rancher chart/image settings"}
 	}

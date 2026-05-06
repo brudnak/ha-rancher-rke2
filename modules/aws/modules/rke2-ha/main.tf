@@ -51,6 +51,12 @@ variable "aws_route53_fqdn" {
   description = "Route53 FQDN for DNS records"
 }
 
+variable "custom_hostname_prefix" {
+  type        = string
+  description = "Optional custom DNS label for the Rancher URL. Resource names still use aws_prefix."
+  default     = ""
+}
+
 # Resources
 resource "random_pet" "name" {
   keepers = {
@@ -68,9 +74,10 @@ resource "random_id" "unique" {
 }
 
 locals {
-  name_prefix         = "${var.aws_prefix}-${random_pet.name.id}-${random_id.unique.hex}"
-  target_group_prefix = substr(local.name_prefix, 0, 28)
-  domain_name         = "${local.name_prefix}.${var.aws_route53_fqdn}"
+  resource_name_prefix = "${var.aws_prefix}-${random_pet.name.id}-${random_id.unique.hex}"
+  dns_label            = trimspace(var.custom_hostname_prefix) != "" ? trimspace(var.custom_hostname_prefix) : local.resource_name_prefix
+  target_group_prefix  = substr(local.resource_name_prefix, 0, 28)
+  domain_name          = "${local.dns_label}.${var.aws_route53_fqdn}"
 }
 
 resource "aws_instance" "aws_instance" {
@@ -85,13 +92,13 @@ resource "aws_instance" "aws_instance" {
   root_block_device {
     volume_size = 200
     tags = {
-      Name  = "${local.name_prefix}-${count.index + 1}"
+      Name  = "${local.resource_name_prefix}-${count.index + 1}"
       Owner = "${var.aws_prefix}-terraform"
     }
   }
 
   tags = {
-    Name  = "${local.name_prefix}-${count.index + 1}"
+    Name  = "${local.resource_name_prefix}-${count.index + 1}"
     Owner = "${var.aws_prefix}-terraform"
   }
 }
@@ -121,7 +128,7 @@ resource "aws_lb_target_group_attachment" "attach_tg_80" {
 
 resource "aws_lb" "aws_lb" {
   load_balancer_type = "application"
-  name               = local.name_prefix
+  name               = local.resource_name_prefix
   internal           = false
   ip_address_type    = "ipv4"
   subnets            = [var.aws_subnet_a, var.aws_subnet_b, var.aws_subnet_c]
@@ -149,7 +156,7 @@ data "aws_route53_zone" "zone" {
 
 resource "aws_route53_record" "aws_route53_record" {
   zone_id = data.aws_route53_zone.zone.zone_id
-  name    = local.name_prefix
+  name    = local.dns_label
   type    = "CNAME"
   ttl     = "60"
   records = [aws_lb.aws_lb.dns_name]

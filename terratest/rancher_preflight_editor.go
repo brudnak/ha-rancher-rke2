@@ -82,6 +82,8 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
 	if err != nil {
 		return fmt.Errorf("failed to serialize preflight versions: %w", err)
 	}
+	initialCustomHostname := currentCustomHostnamePrefix()
+	initialCustomHostnameEnabled := initialCustomHostname != ""
 
 	pageTemplate := template.Must(template.New("preflight-editor").Parse(`<!DOCTYPE html>
 <html lang="en">
@@ -183,6 +185,12 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
       display: grid;
       gap: 10px;
     }
+    .field-help {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+      margin: 10px 6px 2px;
+    }
     .row {
       padding: 10px 6px;
       border-top: 1px solid var(--border);
@@ -211,6 +219,58 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
     }
     .summary strong {
       color: var(--text);
+    }
+    .custom-hostname {
+      margin-top: 18px;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(30, 106, 82, 0.08);
+      display: grid;
+      gap: 12px;
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      color: var(--text);
+      font-weight: 800;
+    }
+    .checkbox-row input {
+      margin-top: 3px;
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+      flex: 0 0 auto;
+    }
+    .checkbox-row span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+      margin-top: 3px;
+    }
+    .hostname-row {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }
+    .hostname-suffix {
+      color: var(--muted);
+      font-weight: 750;
+      overflow-wrap: anywhere;
+    }
+    .hostname-help {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .custom-hostname[data-enabled="false"] .hostname-row {
+      display: none;
+    }
+    .custom-hostname[data-enabled="false"] .hostname-help {
+      display: none;
     }
     .error {
       margin-top: 14px;
@@ -294,11 +354,26 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
           <div>Remove</div>
         </div>
         <div class="rows" id="rows"></div>
+        <div class="field-help">Examples: 2.14-head, v2.14-head, or head. Leading v is stripped when saved.</div>
+        <div class="custom-hostname" id="customHostnameBox" data-enabled="false">
+          <label class="checkbox-row">
+            <input id="customHostnameToggle" type="checkbox" />
+            <div>
+              Use a custom Rancher URL
+              <span>Creates exactly one HA and uses this DNS label for Rancher. AWS resource names still use <code>aws_prefix</code>.</span>
+            </div>
+          </label>
+          <div class="hostname-row">
+            <input id="customHostnameInput" type="text" placeholder="foobar" />
+            <div class="hostname-suffix" id="hostnameSuffix"></div>
+          </div>
+          <div class="hostname-help">Example: type foobar and Rancher will use foobar.the.example.com.</div>
+        </div>
         <div class="summary">
           <div><strong>Total HAs for this run:</strong> <span id="totalHasValue"></span></div>
           <div><strong>Config file:</strong> <code>{{.ConfigPath}}</code></div>
           <div><strong>Mode:</strong> auto</div>
-          <div>This screen edits only <code>rancher.versions</code> and <code>total_has</code>. The next step shows the resolved chart, image, and RKE2 plan.</div>
+          <div>This screen edits <code>rancher.versions</code>, <code>total_has</code>, and the optional custom Rancher hostname. The next step shows the resolved chart, image, and RKE2 plan.</div>
         </div>
         <div class="error" id="errorBox"></div>
         <div class="status" id="statusBox"></div>
@@ -317,6 +392,8 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
   <script>
     const token = {{printf "%q" .Token}};
     let versions = {{.InitialVersionsJSON}};
+    let customHostnameEnabled = {{.InitialCustomHostnameEnabled}};
+    let customHostname = sanitizeDisplayValue({{printf "%q" .InitialCustomHostname}});
     let saving = false;
     const rowsEl = document.getElementById('rows');
     const totalHasValueEl = document.getElementById('totalHasValue');
@@ -325,6 +402,10 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
     const addBtnEl = document.getElementById('addBtn');
     const cancelBtnEl = document.getElementById('cancelBtn');
     const continueBtnEl = document.getElementById('continueBtn');
+    const customHostnameBoxEl = document.getElementById('customHostnameBox');
+    const customHostnameToggleEl = document.getElementById('customHostnameToggle');
+    const customHostnameInputEl = document.getElementById('customHostnameInput');
+    const hostnameSuffixEl = document.getElementById('hostnameSuffix');
 
     function escapeHtml(value) {
       return String(value)
@@ -334,9 +415,26 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
         .replaceAll('"', '&quot;');
     }
 
+    function sanitizeDisplayValue(value) {
+      let next = String(value || '').trim();
+      while (next.length >= 2) {
+        const first = next[0];
+        const last = next[next.length - 1];
+        if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+          next = next.slice(1, -1).trim();
+          continue;
+        }
+        break;
+      }
+      return next;
+    }
+
     function renderRows() {
+      if (customHostnameEnabled && versions.length !== 1) {
+        versions = [versions[0] || ''];
+      }
       rowsEl.innerHTML = versions.map((version, index) => {
-        const removeDisabled = versions.length === 1 ? ' disabled' : '';
+        const removeDisabled = customHostnameEnabled || versions.length === 1 ? ' disabled' : '';
         return (
           '<div class="row">' +
             '<div class="ha-label">HA ' + (index + 1) + '</div>' +
@@ -346,6 +444,7 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
         );
       }).join('');
       totalHasValueEl.textContent = String(versions.length);
+      addBtnEl.disabled = saving || customHostnameEnabled;
 
       rowsEl.querySelectorAll('input[data-index]').forEach(input => {
         input.addEventListener('input', event => {
@@ -360,14 +459,29 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
           if (versions.length === 1 || saving) {
             return;
           }
+          if (customHostnameEnabled) {
+            return;
+          }
           versions.splice(Number(button.getAttribute('data-remove-index')), 1);
           renderRows();
         });
       });
     }
 
+    function renderCustomHostname() {
+      customHostnameBoxEl.dataset.enabled = customHostnameEnabled ? 'true' : 'false';
+      customHostnameToggleEl.checked = customHostnameEnabled;
+      customHostnameInputEl.value = customHostname;
+      hostnameSuffixEl.textContent = '.the.example.com';
+      renderRows();
+    }
+
+    function normalizeVersion(value) {
+      return String(value || '').trim().replace(/^[vV]/, '');
+    }
+
     function normalizedVersions() {
-      return versions.map(version => String(version || '').trim()).filter((_, index) => true);
+      return versions.map(version => normalizeVersion(version)).filter((_, index) => true);
     }
 
     function validateVersions() {
@@ -380,16 +494,26 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
           return 'Version for HA ' + (i + 1) + ' cannot be empty.';
         }
       }
+      if (customHostnameEnabled) {
+        if (trimmed.length !== 1) {
+          return 'Custom Rancher URL can only be used with one HA.';
+        }
+        if (!String(customHostname || '').trim()) {
+          return 'Enter a custom Rancher URL label.';
+        }
+      }
       return '';
     }
 
     function setSavingState(nextSaving) {
       saving = nextSaving;
-      addBtnEl.disabled = nextSaving;
+      addBtnEl.disabled = nextSaving || customHostnameEnabled;
       cancelBtnEl.disabled = nextSaving;
       continueBtnEl.disabled = nextSaving;
+      customHostnameToggleEl.disabled = nextSaving;
+      customHostnameInputEl.disabled = nextSaving;
       rowsEl.querySelectorAll('input, button[data-remove-index]').forEach(el => {
-        el.disabled = nextSaving || (el.hasAttribute('data-remove-index') && versions.length === 1);
+        el.disabled = nextSaving || (el.hasAttribute('data-remove-index') && (customHostnameEnabled || versions.length === 1));
       });
     }
 
@@ -407,7 +531,11 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
       const response = await fetch('/submit?token=' + encodeURIComponent(token), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ versions: normalizedVersions() })
+        body: JSON.stringify({
+          versions: normalizedVersions(),
+          customHostnameEnabled,
+          customHostname
+        })
       });
       if (!response.ok) {
         errorBoxEl.textContent = await response.text();
@@ -428,16 +556,28 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
     }
 
     addBtnEl.addEventListener('click', () => {
-      if (saving) {
+      if (saving || customHostnameEnabled) {
         return;
       }
       versions.push('');
       renderRows();
     });
+    customHostnameToggleEl.addEventListener('change', event => {
+      if (saving) {
+        return;
+      }
+      customHostnameEnabled = event.target.checked;
+      errorBoxEl.textContent = '';
+      renderCustomHostname();
+    });
+    customHostnameInputEl.addEventListener('input', event => {
+      customHostname = event.target.value;
+      errorBoxEl.textContent = '';
+    });
     cancelBtnEl.addEventListener('click', cancel);
     continueBtnEl.addEventListener('click', continueToPlan);
 
-    renderRows();
+    renderCustomHostname();
   </script>
 </body>
 </html>`))
@@ -455,13 +595,17 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = pageTemplate.Execute(w, struct {
-			Token               string
-			ConfigPath          string
-			InitialVersionsJSON template.JS
+			Token                        string
+			ConfigPath                   string
+			InitialVersionsJSON          template.JS
+			InitialCustomHostnameEnabled bool
+			InitialCustomHostname        string
 		}{
-			Token:               token,
-			ConfigPath:          configPath,
-			InitialVersionsJSON: template.JS(string(initialVersionsJSON)),
+			Token:                        token,
+			ConfigPath:                   configPath,
+			InitialVersionsJSON:          template.JS(string(initialVersionsJSON)),
+			InitialCustomHostnameEnabled: initialCustomHostnameEnabled,
+			InitialCustomHostname:        initialCustomHostname,
 		})
 	})
 	mux.HandleFunc("/submit", func(w http.ResponseWriter, r *http.Request) {
@@ -474,9 +618,7 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
 			return
 		}
 
-		var req struct {
-			Versions []string `json:"versions"`
-		}
+		var req preflightConfigUpdate
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
@@ -487,8 +629,9 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		req.Versions = normalizedVersions
 
-		if err := updateAutoModeConfigFile(configPath, normalizedVersions); err != nil {
+		if err := updateAutoModeConfigFile(configPath, req); err != nil {
 			http.Error(w, fmt.Sprintf("failed to update tool-config.yml: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -567,10 +710,24 @@ func normalizePreflightVersions(versions []string) ([]string, error) {
 	return normalized, nil
 }
 
-func updateAutoModeConfigFile(configPath string, versions []string) error {
-	normalizedVersions, err := normalizePreflightVersions(versions)
+func updateAutoModeConfigFile(configPath string, update preflightConfigUpdate) error {
+	normalizedVersions, err := normalizePreflightVersions(update.Versions)
 	if err != nil {
 		return err
+	}
+	if err := normalizePreflightConfigUpdate(&update); err != nil {
+		return err
+	}
+	route53FQDN := viper.GetString("tf_vars.aws_route53_fqdn")
+	if update.TFVars != nil {
+		route53FQDN = update.TFVars["aws_route53_fqdn"]
+	}
+	customHostnamePrefix, err := normalizeCustomHostnameSelectionForDomain(update.CustomHostnameEnabled, update.CustomHostnameInput, route53FQDN)
+	if err != nil {
+		return err
+	}
+	if customHostnamePrefix != "" && len(normalizedVersions) != 1 {
+		return fmt.Errorf("custom Rancher URL can only be used with one HA")
 	}
 
 	content, err := os.ReadFile(configPath)
@@ -592,9 +749,30 @@ func updateAutoModeConfigFile(configPath string, versions []string) error {
 	}
 
 	rancherNode := ensureMappingValue(root, "rancher")
+	if update.TFVars != nil {
+		setStringValue(rancherNode, "mode", "auto")
+		setStringValue(rancherNode, "distro", update.Distro)
+		setStringValue(rancherNode, "bootstrap_password", update.BootstrapPassword)
+		rke2Node := ensureMappingValue(root, "rke2")
+		setBoolValue(rke2Node, "preload_images", update.PreloadImages)
+	}
 	setStringSequenceValue(rancherNode, "versions", normalizedVersions)
 	deleteMappingKey(rancherNode, "version")
 	setIntValue(root, "total_has", len(normalizedVersions))
+	if update.TFVars != nil {
+		tfVarsNode := ensureMappingValue(root, "tf_vars")
+		for _, key := range editableTFVarKeys {
+			setStringValue(tfVarsNode, key, update.TFVars[key])
+		}
+	}
+	if customHostnamePrefix == "" {
+		if tfVarsNode := mappingValue(root, "tf_vars"); tfVarsNode != nil {
+			deleteMappingKey(tfVarsNode, "custom_hostname_prefix")
+		}
+	} else {
+		tfVarsNode := ensureMappingValue(root, "tf_vars")
+		setStringValue(tfVarsNode, "custom_hostname_prefix", customHostnamePrefix)
+	}
 
 	var output bytes.Buffer
 	encoder := yaml.NewEncoder(&output)
@@ -613,6 +791,16 @@ func updateAutoModeConfigFile(configPath string, versions []string) error {
 	viper.Set("rancher.versions", normalizedVersions)
 	viper.Set("total_has", len(normalizedVersions))
 	viper.Set("rancher.version", "")
+	if update.TFVars != nil {
+		viper.Set("rancher.mode", "auto")
+		viper.Set("rancher.distro", update.Distro)
+		viper.Set("rancher.bootstrap_password", update.BootstrapPassword)
+		viper.Set("rke2.preload_images", update.PreloadImages)
+		for _, key := range editableTFVarKeys {
+			viper.Set("tf_vars."+key, update.TFVars[key])
+		}
+	}
+	viper.Set(customHostnameConfigKey, customHostnamePrefix)
 
 	return nil
 }
@@ -682,6 +870,42 @@ func setStringSequenceValue(mapping *yaml.Node, key string, values []string) {
 			Style: yaml.DoubleQuotedStyle,
 			Value: value,
 		})
+	}
+}
+
+func setStringValue(mapping *yaml.Node, key string, value string) {
+	valueNode := mappingValue(mapping, key)
+	if valueNode == nil {
+		mapping.Content = append(mapping.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+			&yaml.Node{},
+		)
+		valueNode = mapping.Content[len(mapping.Content)-1]
+	}
+
+	valueNode.Kind = yaml.ScalarNode
+	valueNode.Tag = "!!str"
+	valueNode.Style = yaml.DoubleQuotedStyle
+	valueNode.Value = value
+}
+
+func setBoolValue(mapping *yaml.Node, key string, value bool) {
+	valueNode := mappingValue(mapping, key)
+	if valueNode == nil {
+		mapping.Content = append(mapping.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+			&yaml.Node{},
+		)
+		valueNode = mapping.Content[len(mapping.Content)-1]
+	}
+
+	valueNode.Kind = yaml.ScalarNode
+	valueNode.Tag = "!!bool"
+	valueNode.Style = 0
+	if value {
+		valueNode.Value = "true"
+	} else {
+		valueNode.Value = "false"
 	}
 }
 

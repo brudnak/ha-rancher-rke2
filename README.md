@@ -261,7 +261,7 @@ total_has: 2  # Number of HA clusters to create (must match number of rancher.ve
 
 tf_vars:
   aws_region: "us-east-2"
-  aws_prefix: "xyz" # your initials, keep it short! 
+  aws_prefix: "xyz" # 2 or 3 letters, usually your initials
   aws_vpc: ""
   aws_subnet_a: ""
   aws_subnet_b: ""
@@ -271,6 +271,9 @@ tf_vars:
   aws_security_group_id: ""
   aws_pem_key_name: ""
   aws_route53_fqdn: ""
+  # Optional custom Rancher DNS label, for example "brudnak" -> brudnak.<aws_route53_fqdn>.
+  # Requires total_has: 1. Omit or leave blank for generated names.
+  custom_hostname_prefix: ""
 ```
 
 In `auto` mode, the tool will:

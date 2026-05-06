@@ -23,6 +23,12 @@ func TestHaSetup(t *testing.T) {
 	if totalHAs < 1 {
 		t.Fatal("total_has must be at least 1")
 	}
+	if err := validateAWSPrefixConfig(); err != nil {
+		t.Fatalf("AWS prefix preflight failed: %v", err)
+	}
+	if err := validateAWSPemKeyNameConfig(); err != nil {
+		t.Fatalf("AWS PEM key preflight failed: %v", err)
+	}
 
 	helmCommands := viper.GetStringSlice("rancher.helm_commands")
 	if len(helmCommands) != totalHAs {

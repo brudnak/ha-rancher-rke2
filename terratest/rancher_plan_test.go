@@ -50,6 +50,33 @@ func TestFindLatestMinorReleaseErrorsWithoutGA(t *testing.T) {
 	}
 }
 
+func TestFindLatestReleaseIgnoresPrereleases(t *testing.T) {
+	results := []helmSearchResult{
+		{Version: "2.15.0-alpha3"},
+		{Version: "2.14.2"},
+		{Version: "2.14.1"},
+		{Version: "2.13.9"},
+	}
+
+	version, err := findLatestRelease(results)
+	if err != nil {
+		t.Fatalf("expected latest released chart version, got error: %v", err)
+	}
+	if version != "2.14.2" {
+		t.Fatalf("expected latest released chart version 2.14.2, got %s", version)
+	}
+}
+
+func TestClassifyRancherVersionAllowsPlainHead(t *testing.T) {
+	buildType, minorLine, err := classifyRancherVersion("head")
+	if err != nil {
+		t.Fatalf("expected plain head to be valid, got error: %v", err)
+	}
+	if buildType != "head" || minorLine != "" {
+		t.Fatalf("expected plain head classification, got buildType=%q minorLine=%q", buildType, minorLine)
+	}
+}
+
 func TestParseHelmSearchResultsSkipsLeadingWarnings(t *testing.T) {
 	output := []byte(`WARNING: Kubernetes configuration file is group-readable. This is insecure.
 WARNING: Kubernetes configuration file is world-readable. This is insecure.
@@ -178,6 +205,11 @@ func TestResolveImageSettingsAllowsMixedReleaseAndAlphaSources(t *testing.T) {
 	headImage, headTag, headAgent, _ := resolveImageSettings("2.14-head", "head", "community")
 	if headImage != "" || headTag != "v2.14-head" || headAgent != "" {
 		t.Fatalf("expected community head to use chart image with tag override only, got image=%q tag=%q agent=%q", headImage, headTag, headAgent)
+	}
+
+	plainHeadImage, plainHeadTag, plainHeadAgent, _ := resolveImageSettings("head", "head", "community")
+	if plainHeadImage != "" || plainHeadTag != "head" || plainHeadAgent != "" {
+		t.Fatalf("expected plain head to use Docker Hub head tag without agent override, got image=%q tag=%q agent=%q", plainHeadImage, plainHeadTag, plainHeadAgent)
 	}
 }
 
@@ -376,6 +408,42 @@ func TestBuildAutoHelmCommandsCommunityHeadDoesNotOverrideAgentImage(t *testing.
 	for _, snippet := range forbiddenSnippets {
 		if strings.Contains(command, snippet) {
 			t.Fatalf("expected community head command not to contain %q, got:\n%s", snippet, command)
+		}
+	}
+}
+
+func TestBuildAutoHelmCommandsPlainHeadUsesDockerHubHeadTag(t *testing.T) {
+	commands := buildAutoHelmCommands(
+		1,
+		rancherHelmOperationInstall,
+		"rancher-latest",
+		"2.14.1",
+		"admin",
+		"",
+		"head",
+		"",
+		true,
+	)
+
+	command := commands[0]
+	expectedSnippets := []string{
+		"helm install rancher rancher-latest/rancher",
+		"--version 2.14.1",
+		"--set image.tag=head",
+	}
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(command, snippet) {
+			t.Fatalf("expected helm command to contain %q, got:\n%s", snippet, command)
+		}
+	}
+	forbiddenSnippets := []string{
+		"image.tag=vhead",
+		"CATTLE_AGENT_IMAGE",
+		"stgregistry.suse.com",
+	}
+	for _, snippet := range forbiddenSnippets {
+		if strings.Contains(command, snippet) {
+			t.Fatalf("expected plain head command not to contain %q, got:\n%s", snippet, command)
 		}
 	}
 }
