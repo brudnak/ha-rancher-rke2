@@ -5,9 +5,22 @@ const clustersEl = document.getElementById('clusters')
 const refreshStatusEl = document.getElementById('refreshStatus')
 const logStatusEl = document.getElementById('logStatus')
 const logBoxEl = document.getElementById('logBox')
+const logModalEl = document.getElementById('logModal')
+const logModalKindEl = document.getElementById('logModalKind')
+const logModalTitleEl = document.getElementById('logModalTitle')
+const logModalSubtitleEl = document.getElementById('logModalSubtitle')
+const logSearchEl = document.getElementById('logSearch')
+const logMatchCountEl = document.getElementById('logMatchCount')
+const logLevelFiltersEl = document.getElementById('logLevelFilters')
+const liveLogStateEl = document.getElementById('liveLogState')
+const liveLogStateIconEl = document.getElementById('liveLogStateIcon')
+const liveLogStateLabelEl = document.getElementById('liveLogStateLabel')
+const openLogViewerBtnEl = document.getElementById('openLogViewerBtn')
+const stopStreamBtnEl = document.getElementById('stopStreamBtn')
 const cleanupStatusEl = document.getElementById('cleanupStatus')
-const cleanupBoxEl = document.getElementById('cleanupBox')
 const cleanupConfirmEl = document.getElementById('cleanupConfirm')
+const openCleanupLogsBtnEl = document.getElementById('openCleanupLogsBtn')
+const cleanupCostEl = document.getElementById('cleanupCost')
 const themeToggleEl = document.getElementById('themeToggle')
 const themeSunIconEl = document.getElementById('themeSunIcon')
 const themeMoonIconEl = document.getElementById('themeMoonIcon')
@@ -24,6 +37,11 @@ let activeDownloadClusterId = ''
 let activeCopyClusterId = ''
 let lastLeaderChangeMessage = ''
 let refreshInFlight = false
+let rawLogText = ''
+let visibleLogText = ''
+let activeLogContext = null
+let activeLogLevel = 'all'
+let liveLogState = 'idle'
 
 const currentTheme = () => document.documentElement.classList.contains('dark') ? 'dark' : 'light'
 
@@ -43,6 +61,218 @@ const escapeHtml = value => String(value || '')
   .replaceAll('>', '&gt;')
   .replaceAll('"', '&quot;')
   .replaceAll('\'', '&#39;')
+
+const escapeRegExp = value => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const highlightLogLine = (line, query) => {
+  const escapedLine = escapeHtml(line)
+  if (!query) {
+    return escapedLine || '&nbsp;'
+  }
+
+  const pattern = new RegExp(escapeRegExp(query), 'ig')
+  const highlighted = escapedLine.replace(pattern, match => `<mark class="rounded bg-amber-200 px-0.5 text-zinc-950 dark:bg-amber-300">${match}</mark>`)
+  return highlighted || '&nbsp;'
+}
+
+const lineMatchesLogLevel = (line, level) => {
+  if (level === 'all') {
+    return true
+  }
+
+  const patterns = {
+    info: /\b(info|level=info|level="info")\b/i,
+    debug: /\b(debug|level=debug|level="debug")\b/i,
+    warning: /\b(warn|warning|level=warn|level=warning|level="warn"|level="warning")\b/i,
+    error: /\b(error|err|level=error|level=err|level="error"|level="err")\b/i
+  }
+
+  return patterns[level]?.test(line) || false
+}
+
+const extractCleanupLineValue = (output, label) => {
+  const line = output.find(item => item.includes(label))
+  if (!line) {
+    return ''
+  }
+
+  return line.slice(line.indexOf(label) + label.length).trim()
+}
+
+const parseCleanupCost = output => {
+  const total = extractCleanupLineValue(output, 'Estimated total (EC2 + EBS only):')
+  if (!total) {
+    return null
+  }
+
+  return {
+    total,
+    region: extractCleanupLineValue(output, 'Region:'),
+    runtime: extractCleanupLineValue(output, 'Total runtime across instances:'),
+    ec2: extractCleanupLineValue(output, 'EC2:'),
+    ebs: extractCleanupLineValue(output, 'EBS:')
+  }
+}
+
+const setActiveLogLevel = level => {
+  activeLogLevel = level
+  logLevelFiltersEl.querySelectorAll('button[data-level]').forEach(button => {
+    const active = button.dataset.level === level
+    button.className = active
+      ? 'rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300'
+      : 'rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-600 hover:bg-zinc-50 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-300 dark:hover:bg-white/[0.1]'
+  })
+  renderLogViewer()
+}
+
+const setLiveLogState = state => {
+  liveLogState = state
+
+  const states = {
+    idle: {
+      label: 'Idle',
+      container: 'border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-400',
+      icon: 'bg-zinc-400',
+      button: 'Start live'
+    },
+    connecting: {
+      label: 'Connecting to live logs...',
+      container: 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/15 dark:text-sky-300',
+      icon: 'bg-sky-500 animate-ping',
+      button: 'Stop live'
+    },
+    live: {
+      label: 'Live stream connected',
+      container: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300',
+      icon: 'bg-emerald-500 animate-pulse',
+      button: 'Stop live'
+    },
+    stopped: {
+      label: 'Live stream stopped',
+      container: 'border-zinc-200 bg-zinc-50 text-zinc-600 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-300',
+      icon: 'bg-zinc-400',
+      button: 'Resume live'
+    },
+    error: {
+      label: 'Live stream interrupted',
+      container: 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/15 dark:text-rose-300',
+      icon: 'bg-rose-500',
+      button: 'Resume live'
+    },
+    cleanupRunning: {
+      label: 'Cleanup running',
+      container: 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/15 dark:text-sky-300',
+      icon: 'bg-sky-500 animate-pulse',
+      button: 'Live disabled'
+    },
+    cleanupDone: {
+      label: 'Cleanup completed',
+      container: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300',
+      icon: 'bg-emerald-500',
+      button: 'Live disabled'
+    },
+    cleanupError: {
+      label: 'Cleanup failed',
+      container: 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/15 dark:text-rose-300',
+      icon: 'bg-rose-500',
+      button: 'Live disabled'
+    }
+  }
+  const selected = states[state] || states.idle
+
+  liveLogStateEl.className = `mt-3 inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${selected.container}`
+  liveLogStateIconEl.className = `h-2.5 w-2.5 rounded-full ${selected.icon}`
+  liveLogStateLabelEl.textContent = selected.label
+  stopStreamBtnEl.textContent = selected.button
+  stopStreamBtnEl.classList.toggle('hidden', state.startsWith('cleanup'))
+}
+
+const logFilename = () => {
+  if (activeLogContext?.mode === 'cleanup') {
+    const filter = logSearchEl.value.trim() ? '-filtered' : ''
+    return `cleanup${filter}.log`
+  }
+
+  const pod = activeLogContext?.podName || 'pod'
+  const mode = activeLogContext?.mode || 'logs'
+  const filter = logSearchEl.value.trim() ? '-filtered' : ''
+  const safePod = pod.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'pod'
+  return `${safePod}-${mode}${filter}.log`
+}
+
+const openLogModal = () => {
+  logModalEl.classList.remove('hidden')
+  document.body.classList.add('overflow-hidden')
+}
+
+const closeLogModal = () => {
+  logModalEl.classList.add('hidden')
+  document.body.classList.remove('overflow-hidden')
+}
+
+const setActiveLogContext = (mode, clusterId, namespace, podName) => {
+  activeLogContext = { mode, clusterId, namespace, podName }
+  logModalKindEl.textContent = 'Pod logs'
+  logModalTitleEl.textContent = podName
+  logModalSubtitleEl.textContent = `${namespace} • ${clusterId} • ${mode === 'live' ? 'live stream' : 'tail snapshot'}`
+  openLogViewerBtnEl.classList.remove('hidden')
+}
+
+const setCleanupLogContext = () => {
+  activeLogContext = { mode: 'cleanup', clusterId: 'local', namespace: 'terratest', podName: 'cleanup' }
+  logModalKindEl.textContent = 'Cleanup logs'
+  logModalTitleEl.textContent = 'Cleanup'
+  logModalSubtitleEl.textContent = 'go test -v -run TestHACleanup -timeout 20m ./terratest'
+  openLogViewerBtnEl.classList.remove('hidden')
+}
+
+const renderLogViewer = () => {
+  const query = logSearchEl.value.trim()
+  const entries = rawLogText.split('\n').map((line, index) => ({ line, index: index + 1 }))
+  const filteredEntries = entries.filter(entry => {
+    const queryMatches = query ? entry.line.toLowerCase().includes(query.toLowerCase()) : true
+    return queryMatches && lineMatchesLogLevel(entry.line, activeLogLevel)
+  })
+
+  visibleLogText = filteredEntries.map(entry => entry.line).join('\n')
+  const filterLabel = activeLogLevel === 'all' ? '' : ` • ${activeLogLevel.toUpperCase()}`
+  logMatchCountEl.textContent = query || activeLogLevel !== 'all'
+    ? `${filteredEntries.length} of ${entries.length} lines${filterLabel}`
+    : `${entries.length} lines`
+
+  if (!filteredEntries.length || (filteredEntries.length === 1 && filteredEntries[0].line === '')) {
+    const waitingForLive = activeLogContext?.mode === 'live' && (liveLogState === 'connecting' || liveLogState === 'live')
+    const waitingForCleanup = activeLogContext?.mode === 'cleanup' && liveLogState === 'cleanupRunning'
+    const waiting = waitingForLive || waitingForCleanup
+    logBoxEl.innerHTML = `
+      <div class="flex h-full min-h-64 items-center justify-center rounded-xl border border-dashed border-zinc-300 bg-white text-sm text-zinc-500 dark:border-white/10 dark:bg-white/[0.03] dark:text-zinc-400">
+        <div class="flex items-center gap-3">
+          ${waiting ? '<span class="spinner"></span>' : ''}
+          <span>${waitingForLive ? 'Waiting for live log lines...' : waitingForCleanup ? 'Waiting for cleanup output...' : query || activeLogLevel !== 'all' ? 'No matching log lines.' : 'No logs loaded yet.'}</span>
+        </div>
+      </div>
+    `
+    return
+  }
+
+  logBoxEl.innerHTML = filteredEntries.map(entry => `
+    <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] border-b border-zinc-200/70 bg-white/60 last:border-b-0 dark:border-white/5 dark:bg-white/[0.02]">
+      <div class="select-none px-3 py-1.5 text-right text-[11px] tabular-nums text-zinc-400 dark:text-zinc-600">${entry.index}</div>
+      <code class="min-w-0 whitespace-pre-wrap break-words px-3 py-1.5 text-zinc-800 dark:text-zinc-200">${highlightLogLine(entry.line, query)}</code>
+    </div>
+  `).join('')
+}
+
+const appendLogLine = line => {
+  if (activeLogContext?.mode === 'live' && liveLogState !== 'live') {
+    setLiveLogState('live')
+  }
+  rawLogText = rawLogText ? `${rawLogText}\n${line}` : line
+  renderLogViewer()
+  if (!logSearchEl.value.trim()) {
+    logBoxEl.scrollTop = logBoxEl.scrollHeight
+  }
+}
 
 const clusterItems = state => state && state.clusters && Array.isArray(state.clusters.items)
   ? state.clusters.items
@@ -149,7 +379,7 @@ const renderPodRows = (cluster, pods, changedLeader) => {
 
     return `
       <tr class="${rowClass}">
-        <td class="px-3 py-3 align-top text-sm text-zinc-600 dark:text-zinc-400">${escapeHtml(pod.namespace || '')}</td>
+        <td class="break-words px-3 py-3 align-top text-sm text-zinc-600 dark:text-zinc-400">${escapeHtml(pod.namespace || '')}</td>
         <td class="px-3 py-3 align-top">
           <div class="flex flex-wrap items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
             <span>${escapeHtml(pod.name)}</span>
@@ -160,12 +390,12 @@ const renderPodRows = (cluster, pods, changedLeader) => {
             <button type="button" data-action="live" data-cluster="${escapeHtml(cluster.id)}" data-namespace="${escapeHtml(pod.namespace || 'cattle-system')}" data-pod="${escapeHtml(pod.name)}" class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200 dark:hover:bg-white/[0.1]">Live</button>
           </div>
         </td>
-        <td class="px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${escapeHtml(pod.ready)}</td>
-        <td class="px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${escapeHtml(pod.status)}</td>
-        <td class="px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${pod.restarts}</td>
-        <td class="px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${escapeHtml(pod.age)}</td>
-        <td class="px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${escapeHtml(pod.node || '')}</td>
-        <td class="px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${escapeHtml(pod.containers)}</td>
+        <td class="break-words px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${escapeHtml(pod.ready)}</td>
+        <td class="break-words px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${escapeHtml(pod.status)}</td>
+        <td class="break-words px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${pod.restarts}</td>
+        <td class="break-words px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${escapeHtml(pod.age)}</td>
+        <td class="break-words px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${escapeHtml(pod.node || '')}</td>
+        <td class="break-words px-3 py-3 align-top text-sm text-zinc-700 dark:text-zinc-300">${escapeHtml(pod.containers)}</td>
       </tr>
     `
   }).join('')
@@ -189,8 +419,18 @@ const renderPodsTable = (cluster, pods, changedLeader) => {
       <button type="button" data-action="toggle-pods" data-cluster="${escapeHtml(cluster.id)}" class="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200 dark:hover:bg-white/[0.1]">${toggleText}</button>
     </div>
     ${podsCollapsed ? '' : `
-      <div class="mt-3 max-w-full overflow-x-auto rounded-xl border border-zinc-200 dark:border-white/10">
-        <table class="min-w-[760px] border-collapse text-left">
+      <div class="mt-3 max-w-full overflow-hidden rounded-xl border border-zinc-200 dark:border-white/10">
+        <table class="w-full table-fixed border-collapse text-left">
+          <colgroup>
+            <col class="w-[9rem]" />
+            <col class="w-[24rem]" />
+            <col class="w-[5rem]" />
+            <col class="w-[7rem]" />
+            <col class="w-[6rem]" />
+            <col class="w-[5rem]" />
+            <col class="w-[12rem]" />
+            <col />
+          </colgroup>
           <thead class="bg-zinc-50 dark:bg-white/[0.04]">
             <tr>
               ${['Namespace', 'Pod', 'Ready', 'Status', 'Restarts', 'Age', 'Node', 'Containers'].map(label => `<th class="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">${label}</th>`).join('')}
@@ -313,21 +553,72 @@ const updateLeaderTracking = state => {
   lastLeaderChangeMessage = messages.join(' • ')
 }
 
+const renderCleanupCost = (cleanup, output) => {
+  const cost = parseCleanupCost(output)
+  if (cost) {
+    cleanupCostEl.classList.remove('hidden')
+    cleanupCostEl.innerHTML = `
+      <div class="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-left dark:border-emerald-500/20 dark:bg-emerald-500/10">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <div class="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Estimated infrastructure cost while alive</div>
+            <div class="mt-1 text-3xl font-semibold tracking-tight text-emerald-950 dark:text-emerald-100">${escapeHtml(cost.total)}</div>
+            <div class="mt-1 text-sm text-emerald-800/80 dark:text-emerald-200/80">${escapeHtml(cost.region || 'AWS region unavailable')}</div>
+          </div>
+          <div class="grid gap-2 text-sm text-emerald-950 dark:text-emerald-100 sm:min-w-80">
+            ${cost.runtime ? `<div><span class="font-semibold">Runtime:</span> ${escapeHtml(cost.runtime)}</div>` : ''}
+            ${cost.ec2 ? `<div><span class="font-semibold">EC2:</span> ${escapeHtml(cost.ec2)}</div>` : ''}
+            ${cost.ebs ? `<div><span class="font-semibold">EBS:</span> ${escapeHtml(cost.ebs)}</div>` : ''}
+          </div>
+        </div>
+      </div>
+    `
+    return
+  }
+
+  const estimateUnavailable = output.some(line => line.includes('Could not estimate EC2/EBS cost') || line.includes('Terraform outputs unavailable'))
+  if (cleanup && cleanup.finishedAt && estimateUnavailable) {
+    cleanupCostEl.classList.remove('hidden')
+    cleanupCostEl.innerHTML = `
+      <div class="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-left text-sm text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
+        Unable to estimate infrastructure cost for this cleanup run. The cleanup still ran; AWS pricing or Terraform outputs were unavailable.
+      </div>
+    `
+    return
+  }
+
+  cleanupCostEl.classList.add('hidden')
+  cleanupCostEl.innerHTML = ''
+}
+
 const renderCleanup = cleanup => {
   const output = cleanup && Array.isArray(cleanup.output) ? cleanup.output : []
 
   if (cleanup && cleanup.running) {
-    cleanupStatusEl.textContent = `Cleanup running${cleanup.startedAt ? ` since ${new Date(cleanup.startedAt).toLocaleTimeString()}` : ''}`
+    cleanupStatusEl.className = 'inline-flex items-center justify-center rounded-full bg-sky-100 px-3 py-1.5 text-xs font-semibold text-sky-700 dark:bg-sky-500/15 dark:text-sky-300'
+    cleanupStatusEl.innerHTML = `<span class="spinner mr-2"></span>Cleanup running${cleanup.startedAt ? ` since ${new Date(cleanup.startedAt).toLocaleTimeString()}` : ''}`
   } else if (cleanup && cleanup.error) {
+    cleanupStatusEl.className = 'inline-flex items-center justify-center rounded-full bg-rose-100 px-3 py-1.5 text-xs font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300'
     cleanupStatusEl.textContent = 'Cleanup finished with error'
   } else if (cleanup && cleanup.finishedAt) {
+    cleanupStatusEl.className = 'inline-flex items-center justify-center rounded-full bg-emerald-100 px-3 py-1.5 text-xs font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
     cleanupStatusEl.textContent = `Cleanup finished successfully at ${new Date(cleanup.finishedAt).toLocaleTimeString()}`
   } else {
+    cleanupStatusEl.className = 'inline-flex items-center justify-center rounded-full bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-600 dark:bg-white/[0.06] dark:text-zinc-300'
     cleanupStatusEl.textContent = 'Idle'
   }
 
-  cleanupBoxEl.textContent = output.join('\n')
-  cleanupBoxEl.scrollTop = cleanupBoxEl.scrollHeight
+  renderCleanupCost(cleanup, output)
+
+  if (activeLogContext?.mode === 'cleanup') {
+    const wasNearBottom = logBoxEl.scrollHeight - logBoxEl.scrollTop - logBoxEl.clientHeight < 80
+    rawLogText = output.join('\n')
+    setLiveLogState(cleanup?.running ? 'cleanupRunning' : cleanup?.error ? 'cleanupError' : cleanup?.finishedAt ? 'cleanupDone' : 'idle')
+    renderLogViewer()
+    if (wasNearBottom && !logSearchEl.value.trim()) {
+      logBoxEl.scrollTop = logBoxEl.scrollHeight
+    }
+  }
 }
 
 const refresh = async () => {
@@ -354,7 +645,16 @@ const refresh = async () => {
   }
 }
 
-const stopStream = () => {
+const stopStream = (options = {}) => {
+  if (!options.internal && activeLogContext?.mode === 'live' && (liveLogState === 'stopped' || liveLogState === 'error')) {
+    if (stream) {
+      stream.close()
+      stream = null
+    }
+    streamLogs(activeLogContext.clusterId, activeLogContext.namespace, activeLogContext.podName, { preserveLogs: true })
+    return
+  }
+
   if (!stream) {
     return
   }
@@ -362,10 +662,19 @@ const stopStream = () => {
   stream.close()
   stream = null
   logStatusEl.textContent = 'Live log stream stopped.'
+  setLiveLogState('stopped')
+  logModalSubtitleEl.textContent = activeLogContext
+    ? `${activeLogContext.namespace} • ${activeLogContext.clusterId} • live stream stopped`
+    : 'Live log stream stopped.'
 }
 
 const loadLogs = async (clusterId, namespace, podName) => {
-  stopStream()
+  stopStream({ internal: true })
+  setActiveLogContext('tail', clusterId, namespace, podName)
+  setLiveLogState('idle')
+  openLogModal()
+  rawLogText = ''
+  renderLogViewer()
   logStatusEl.textContent = `Loading logs for ${podName}...`
 
   const params = new URLSearchParams({ cluster: clusterId, namespace, pod: podName })
@@ -386,33 +695,46 @@ const loadLogs = async (clusterId, namespace, podName) => {
 
   if (!response.ok) {
     logStatusEl.textContent = payload.text || 'Failed to load logs'
+    rawLogText = payload.text || 'Failed to load logs'
+    renderLogViewer()
     return
   }
 
-  logBoxEl.textContent = payload.text || ''
+  rawLogText = payload.text || ''
+  renderLogViewer()
   logBoxEl.scrollTop = logBoxEl.scrollHeight
   logStatusEl.textContent = `Showing recent logs for ${podName}`
 }
 
-const streamLogs = (clusterId, namespace, podName) => {
-  stopStream()
-  logBoxEl.textContent = ''
+const streamLogs = (clusterId, namespace, podName, options = {}) => {
+  stopStream({ internal: true })
+  setActiveLogContext('live', clusterId, namespace, podName)
+  setLiveLogState('connecting')
+  openLogModal()
+  if (!options.preserveLogs) {
+    rawLogText = ''
+  }
+  renderLogViewer()
   logStatusEl.textContent = `Streaming live logs for ${podName}...`
 
   const params = new URLSearchParams({ token, cluster: clusterId, namespace, pod: podName })
   stream = new EventSource(`/api/logs/stream?${params.toString()}`)
   stream.addEventListener('line', event => {
-    logBoxEl.textContent += `${event.data}\n`
-    logBoxEl.scrollTop = logBoxEl.scrollHeight
+    appendLogLine(event.data)
   })
   stream.addEventListener('error', event => {
+    setLiveLogState('error')
     if (event.data) {
-      logBoxEl.textContent += `\n[error] ${event.data}\n`
+      appendLogLine(`[error] ${event.data}`)
     }
   })
   stream.addEventListener('end', () => {
     logStatusEl.textContent = `Live stream finished for ${podName}`
-    stopStream()
+    if (stream) {
+      stream.close()
+      stream = null
+    }
+    setLiveLogState('stopped')
   })
 }
 
@@ -500,6 +822,37 @@ const copyKubeconfig = async clusterId => {
   }
 }
 
+const downloadLogs = () => {
+  const text = visibleLogText || rawLogText
+  if (!text) {
+    logStatusEl.textContent = 'No logs to download yet.'
+    return
+  }
+
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = logFilename()
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+  logStatusEl.textContent = `Downloaded ${link.download}`
+}
+
+const openCleanupLogs = () => {
+  stopStream({ internal: true })
+  setCleanupLogContext()
+  const cleanup = lastState?.cleanup || {}
+  const output = Array.isArray(cleanup.output) ? cleanup.output : []
+  rawLogText = output.join('\n')
+  setLiveLogState(cleanup.running ? 'cleanupRunning' : cleanup.error ? 'cleanupError' : cleanup.finishedAt ? 'cleanupDone' : 'idle')
+  renderLogViewer()
+  openLogModal()
+  logBoxEl.scrollTop = logBoxEl.scrollHeight
+}
+
 const runCleanup = async () => {
   const confirmValue = cleanupConfirmEl.value.trim()
   if (confirmValue.toLowerCase() !== 'cleanup') {
@@ -523,6 +876,11 @@ const runCleanup = async () => {
 
   cleanupConfirmEl.value = ''
   cleanupStatusEl.textContent = 'Cleanup requested...'
+  setCleanupLogContext()
+  setLiveLogState('cleanupRunning')
+  rawLogText = '[control-panel] Cleanup requested...'
+  renderLogViewer()
+  openLogModal()
   refresh()
 }
 
@@ -577,10 +935,35 @@ themeToggleEl.addEventListener('click', () => {
 
 document.getElementById('refreshBtn').addEventListener('click', refresh)
 document.getElementById('cleanupBtn').addEventListener('click', runCleanup)
+openCleanupLogsBtnEl.addEventListener('click', openCleanupLogs)
 document.getElementById('stopStreamBtn').addEventListener('click', stopStream)
 document.getElementById('clearLogsBtn').addEventListener('click', () => {
-  logBoxEl.textContent = ''
+  rawLogText = ''
+  visibleLogText = ''
+  renderLogViewer()
   logStatusEl.textContent = 'Logs cleared.'
+})
+document.getElementById('downloadLogsBtn').addEventListener('click', downloadLogs)
+document.getElementById('closeLogModalBtn').addEventListener('click', closeLogModal)
+openLogViewerBtnEl.addEventListener('click', openLogModal)
+logSearchEl.addEventListener('input', renderLogViewer)
+logLevelFiltersEl.addEventListener('click', event => {
+  const button = event.target.closest('button[data-level]')
+  if (button) {
+    setActiveLogLevel(button.dataset.level)
+  }
+})
+
+logModalEl.addEventListener('click', event => {
+  if (event.target === logModalEl) {
+    closeLogModal()
+  }
+})
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !logModalEl.classList.contains('hidden')) {
+    closeLogModal()
+  }
 })
 
 document.body.addEventListener('htmx:afterRequest', event => {
@@ -590,6 +973,7 @@ document.body.addEventListener('htmx:afterRequest', event => {
   }
 })
 
+setLiveLogState('idle')
 setTheme(currentTheme())
 refresh()
 window.setInterval(refresh, 5000)
