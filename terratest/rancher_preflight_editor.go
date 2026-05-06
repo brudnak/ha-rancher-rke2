@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brudnak/ha-rancher-rke2/terratest/settings"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
@@ -82,7 +83,7 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
 	if err != nil {
 		return fmt.Errorf("failed to serialize preflight versions: %w", err)
 	}
-	initialCustomHostname := currentCustomHostnamePrefix()
+	initialCustomHostname := settings.CurrentCustomHostnamePrefix()
 	initialCustomHostnameEnabled := initialCustomHostname != ""
 
 	pageTemplate := template.Must(template.New("preflight-editor").Parse(`<!DOCTYPE html>
@@ -618,7 +619,7 @@ func editAutoModePreflightWithBrowser(configPath string, versions []string) erro
 			return
 		}
 
-		var req preflightConfigUpdate
+		var req settings.PreflightConfigUpdate
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
@@ -710,19 +711,19 @@ func normalizePreflightVersions(versions []string) ([]string, error) {
 	return normalized, nil
 }
 
-func updateAutoModeConfigFile(configPath string, update preflightConfigUpdate) error {
+func updateAutoModeConfigFile(configPath string, update settings.PreflightConfigUpdate) error {
 	normalizedVersions, err := normalizePreflightVersions(update.Versions)
 	if err != nil {
 		return err
 	}
-	if err := normalizePreflightConfigUpdate(&update); err != nil {
+	if err := settings.NormalizePreflightConfigUpdate(&update); err != nil {
 		return err
 	}
 	route53FQDN := viper.GetString("tf_vars.aws_route53_fqdn")
 	if update.TFVars != nil {
 		route53FQDN = update.TFVars["aws_route53_fqdn"]
 	}
-	customHostnamePrefix, err := normalizeCustomHostnameSelectionForDomain(update.CustomHostnameEnabled, update.CustomHostnameInput, route53FQDN)
+	customHostnamePrefix, err := settings.NormalizeCustomHostnameSelectionForDomain(update.CustomHostnameEnabled, update.CustomHostnameInput, route53FQDN)
 	if err != nil {
 		return err
 	}
@@ -761,7 +762,7 @@ func updateAutoModeConfigFile(configPath string, update preflightConfigUpdate) e
 	setIntValue(root, "total_has", len(normalizedVersions))
 	if update.TFVars != nil {
 		tfVarsNode := ensureMappingValue(root, "tf_vars")
-		for _, key := range editableTFVarKeys {
+		for _, key := range settings.EditableTFVarKeys {
 			setStringValue(tfVarsNode, key, update.TFVars[key])
 		}
 	}
@@ -796,11 +797,11 @@ func updateAutoModeConfigFile(configPath string, update preflightConfigUpdate) e
 		viper.Set("rancher.distro", update.Distro)
 		viper.Set("rancher.bootstrap_password", update.BootstrapPassword)
 		viper.Set("rke2.preload_images", update.PreloadImages)
-		for _, key := range editableTFVarKeys {
+		for _, key := range settings.EditableTFVarKeys {
 			viper.Set("tf_vars."+key, update.TFVars[key])
 		}
 	}
-	viper.Set(customHostnameConfigKey, customHostnamePrefix)
+	viper.Set(settings.CustomHostnameConfigKey, customHostnamePrefix)
 
 	return nil
 }

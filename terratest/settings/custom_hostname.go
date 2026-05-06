@@ -1,4 +1,4 @@
-package test
+package settings
 
 import (
 	"fmt"
@@ -10,11 +10,11 @@ import (
 	"github.com/spf13/viper"
 )
 
-const customHostnameConfigKey = "tf_vars.custom_hostname_prefix"
+const CustomHostnameConfigKey = "tf_vars.custom_hostname_prefix"
 
 var customHostnameLabelPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
-type preflightConfigUpdate struct {
+type PreflightConfigUpdate struct {
 	Versions              []string          `json:"versions"`
 	Distro                string            `json:"distro"`
 	BootstrapPassword     string            `json:"bootstrapPassword"`
@@ -24,32 +24,32 @@ type preflightConfigUpdate struct {
 	CustomHostnameInput   string            `json:"customHostname"`
 }
 
-func currentCustomHostnamePrefix() string {
-	prefix, err := configuredCustomHostnamePrefix()
+func CurrentCustomHostnamePrefix() string {
+	prefix, err := ConfiguredCustomHostnamePrefix()
 	if err != nil {
-		return strings.TrimSpace(viper.GetString(customHostnameConfigKey))
+		return strings.TrimSpace(viper.GetString(CustomHostnameConfigKey))
 	}
 	return prefix
 }
 
-func configuredCustomHostnamePrefix() (string, error) {
-	raw := sanitizeCustomHostnameText(viper.GetString(customHostnameConfigKey))
+func ConfiguredCustomHostnamePrefix() (string, error) {
+	raw := SanitizeCustomHostnameText(viper.GetString(CustomHostnameConfigKey))
 	if raw == "" {
 		return "", nil
 	}
-	return normalizeCustomHostnamePrefix(raw, viper.GetString("tf_vars.aws_route53_fqdn"))
+	return NormalizeCustomHostnamePrefix(raw, viper.GetString("tf_vars.aws_route53_fqdn"))
 }
 
-func normalizeCustomHostnameSelection(enabled bool, input string) (string, error) {
-	return normalizeCustomHostnameSelectionForDomain(enabled, input, viper.GetString("tf_vars.aws_route53_fqdn"))
+func NormalizeCustomHostnameSelection(enabled bool, input string) (string, error) {
+	return NormalizeCustomHostnameSelectionForDomain(enabled, input, viper.GetString("tf_vars.aws_route53_fqdn"))
 }
 
-func normalizeCustomHostnameSelectionForDomain(enabled bool, input, route53FQDN string) (string, error) {
+func NormalizeCustomHostnameSelectionForDomain(enabled bool, input, route53FQDN string) (string, error) {
 	if !enabled {
 		return "", nil
 	}
 
-	prefix, err := normalizeCustomHostnamePrefix(input, route53FQDN)
+	prefix, err := NormalizeCustomHostnamePrefix(input, route53FQDN)
 	if err != nil {
 		return "", err
 	}
@@ -59,8 +59,8 @@ func normalizeCustomHostnameSelectionForDomain(enabled bool, input, route53FQDN 
 	return prefix, nil
 }
 
-func normalizeCustomHostnamePrefix(input, route53FQDN string) (string, error) {
-	value := sanitizeCustomHostnameText(input)
+func NormalizeCustomHostnamePrefix(input, route53FQDN string) (string, error) {
+	value := SanitizeCustomHostnameText(input)
 	if value == "" {
 		return "", nil
 	}
@@ -105,7 +105,7 @@ func normalizeCustomHostnamePrefix(input, route53FQDN string) (string, error) {
 	return host, nil
 }
 
-func sanitizeCustomHostnameText(input string) string {
+func SanitizeCustomHostnameText(input string) string {
 	value := strings.TrimSpace(input)
 	for {
 		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
@@ -116,8 +116,8 @@ func sanitizeCustomHostnameText(input string) string {
 	}
 }
 
-func validateCustomHostnameConfig(totalHAs int) error {
-	prefix, err := configuredCustomHostnamePrefix()
+func ValidateCustomHostnameConfig(totalHAs int) error {
+	prefix, err := ConfiguredCustomHostnamePrefix()
 	if err != nil {
 		return err
 	}
@@ -125,8 +125,8 @@ func validateCustomHostnameConfig(totalHAs int) error {
 		return nil
 	}
 	if totalHAs != 1 {
-		return fmt.Errorf("%s can only be used when total_has is 1; got total_has=%d", customHostnameConfigKey, totalHAs)
+		return fmt.Errorf("%s can only be used when total_has is 1; got total_has=%d", CustomHostnameConfigKey, totalHAs)
 	}
-	viper.Set(customHostnameConfigKey, prefix)
+	viper.Set(CustomHostnameConfigKey, prefix)
 	return nil
 }

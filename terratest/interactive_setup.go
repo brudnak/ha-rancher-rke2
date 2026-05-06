@@ -3,7 +3,6 @@ package test
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brudnak/ha-rancher-rke2/terratest/settings"
+	"github.com/brudnak/ha-rancher-rke2/terratest/ui"
 	"github.com/spf13/viper"
 )
 
@@ -42,12 +43,12 @@ type interactiveResult struct {
 }
 
 type interactiveSetupState struct {
-	Token                 string                  `json:"token"`
-	ConfigPath            string                  `json:"configPath"`
-	Versions              []string                `json:"versions"`
-	Config                editablePreflightConfig `json:"config"`
-	CustomHostnameEnabled bool                    `json:"customHostnameEnabled"`
-	CustomHostname        string                  `json:"customHostname"`
+	Token                 string                           `json:"token"`
+	ConfigPath            string                           `json:"configPath"`
+	Versions              []string                         `json:"versions"`
+	Config                settings.EditablePreflightConfig `json:"config"`
+	CustomHostnameEnabled bool                             `json:"customHostnameEnabled"`
+	CustomHostname        string                           `json:"customHostname"`
 }
 
 type interactiveServer struct {
@@ -78,7 +79,7 @@ func resolveRancherSetup() ([]*RancherResolvedPlan, error) {
 	if totalHAs < 1 {
 		return nil, fmt.Errorf("total_has must be at least 1")
 	}
-	if err := validateCustomHostnameConfig(totalHAs); err != nil {
+	if err := settings.ValidateCustomHostnameConfig(totalHAs); err != nil {
 		return nil, err
 	}
 
@@ -157,18 +158,18 @@ func runInteractiveAutoModeSetup() ([]*RancherResolvedPlan, error) {
 }
 
 func (s *interactiveServer) registerHandlers(mux *http.ServeMux, initialVersions []string) {
-	initialCustomHostname := currentCustomHostnamePrefix()
+	initialCustomHostname := settings.CurrentCustomHostnamePrefix()
 	initialCustomHostnameEnabled := initialCustomHostname != ""
 	initialStateJSON, _ := json.Marshal(interactiveSetupState{
 		Token:                 s.token,
 		ConfigPath:            s.configPath,
 		Versions:              initialVersions,
-		Config:                currentEditablePreflightConfig(),
+		Config:                settings.CurrentEditablePreflightConfig(),
 		CustomHostnameEnabled: initialCustomHostnameEnabled,
 		CustomHostname:        initialCustomHostname,
 	})
 
-	pageTemplate := template.Must(template.New("interactive-setup").Parse(interactiveSetupHTML))
+	pageTemplate := template.Must(template.New("interactive-setup").Parse(ui.InteractiveSetupHTML))
 
 	mux.HandleFunc("/static/interactive_setup.js", func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorized(r) {
@@ -180,7 +181,8 @@ func (s *interactiveServer) registerHandlers(mux *http.ServeMux, initialVersions
 			return
 		}
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		_, _ = w.Write([]byte(interactiveSetupJS))
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(ui.InteractiveSetupJS))
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +196,7 @@ func (s *interactiveServer) registerHandlers(mux *http.ServeMux, initialVersions
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
 		_ = pageTemplate.Execute(w, struct {
 			Token            string
 			ConfigPath       string
@@ -211,7 +214,7 @@ func (s *interactiveServer) registerHandlers(mux *http.ServeMux, initialVersions
 			return
 		}
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, "method not allowed: "+r.Method, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -360,10 +363,10 @@ func (s *interactiveServer) authorized(r *http.Request) bool {
 	return requestFromLoopback(r) && sameOriginBrowserRequest(r)
 }
 
-func decodePreflightConfigUpdateRequest(r *http.Request) (preflightConfigUpdate, error) {
+func decodePreflightConfigUpdateRequest(r *http.Request) (settings.PreflightConfigUpdate, error) {
 	contentType := strings.ToLower(r.Header.Get("Content-Type"))
 	if strings.Contains(contentType, "application/json") {
-		var req preflightConfigUpdate
+		var req settings.PreflightConfigUpdate
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			return req, err
 		}
@@ -371,14 +374,14 @@ func decodePreflightConfigUpdateRequest(r *http.Request) (preflightConfigUpdate,
 	}
 
 	if err := r.ParseForm(); err != nil {
-		return preflightConfigUpdate{}, err
+		return settings.PreflightConfigUpdate{}, err
 	}
-	tfVars := make(map[string]string, len(editableTFVarKeys))
-	for _, key := range editableTFVarKeys {
+	tfVars := make(map[string]string, len(settings.EditableTFVarKeys))
+	for _, key := range settings.EditableTFVarKeys {
 		tfVars[key] = r.FormValue("tfVars." + key)
 	}
 
-	return preflightConfigUpdate{
+	return settings.PreflightConfigUpdate{
 		Versions:              r.Form["versions"],
 		Distro:                r.FormValue("distro"),
 		BootstrapPassword:     r.FormValue("bootstrapPassword"),
@@ -411,7 +414,7 @@ func (s *interactiveServer) runResolution() {
 	}()
 
 	totalHAs := viper.GetInt("total_has")
-	err := validateCustomHostnameConfig(totalHAs)
+	err := settings.ValidateCustomHostnameConfig(totalHAs)
 	var plans []*RancherResolvedPlan
 	if err == nil {
 		plans, err = prepareRancherConfiguration(totalHAs)
@@ -530,9 +533,3 @@ func (t *logTap) flush() {
 		t.onLine(line)
 	}
 }
-
-//go:embed templates/interactive_setup.html
-var interactiveSetupHTML string
-
-//go:embed static/interactive_setup.js
-var interactiveSetupJS string

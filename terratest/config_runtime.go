@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/brudnak/ha-rancher-rke2/terratest/hcl"
+	"github.com/brudnak/ha-rancher-rke2/terratest/settings"
 	"github.com/gruntwork-io/terratest/modules/logger"
 	"github.com/gruntwork-io/terratest/modules/terraform"
 	"github.com/spf13/viper"
@@ -26,14 +27,14 @@ func setupConfig(t *testing.T) {
 }
 
 func getTerraformOptions(t *testing.T, totalHAs int) *terraform.Options {
-	if err := validateAWSPrefixConfig(); err != nil {
+	if err := settings.ValidateAWSPrefixConfig(); err != nil {
 		t.Fatalf("AWS prefix preflight failed: %v", err)
 	}
-	if err := validateAWSPemKeyNameConfig(); err != nil {
+	if err := settings.ValidateAWSPemKeyNameConfig(); err != nil {
 		t.Fatalf("AWS PEM key preflight failed: %v", err)
 	}
 	generateAwsVars()
-	customHostnamePrefix, err := configuredCustomHostnamePrefix()
+	customHostnamePrefix, err := settings.ConfiguredCustomHostnamePrefix()
 	if err != nil {
 		t.Fatalf("Invalid custom Rancher hostname: %v", err)
 	}
@@ -138,7 +139,7 @@ func generateAwsVars() {
 		viper.GetString("tf_vars.aws_security_group_id"),
 		viper.GetString("tf_vars.aws_pem_key_name"),
 		viper.GetString("tf_vars.aws_route53_fqdn"),
-		currentCustomHostnamePrefix(),
+		settings.CurrentCustomHostnamePrefix(),
 	)
 }
 

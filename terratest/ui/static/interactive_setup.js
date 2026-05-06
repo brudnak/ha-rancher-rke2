@@ -535,12 +535,15 @@ const sendResponse = async action => {
   editorErrorBoxEl.textContent = ''
 
   try {
-    const response = await fetch(`/respond?token=${encodeURIComponent(token)}`, {
+    const response = await fetch('/respond', {
       method: 'POST',
+      cache: 'no-store',
+      credentials: 'same-origin',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
       },
-      body
+      body: body.toString()
     })
 
     if (!response.ok) {

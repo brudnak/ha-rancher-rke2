@@ -1,4 +1,4 @@
-package test
+package settings
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-var editableTFVarKeys = []string{
+var EditableTFVarKeys = []string{
 	"aws_region",
 	"aws_prefix",
 	"aws_vpc",
@@ -21,19 +21,19 @@ var editableTFVarKeys = []string{
 	"aws_route53_fqdn",
 }
 
-type editablePreflightConfig struct {
+type EditablePreflightConfig struct {
 	Distro            string            `json:"distro"`
 	BootstrapPassword string            `json:"bootstrapPassword"`
 	PreloadImages     bool              `json:"preloadImages"`
 	TFVars            map[string]string `json:"tfVars"`
 }
 
-func currentEditablePreflightConfig() editablePreflightConfig {
-	tfVars := make(map[string]string, len(editableTFVarKeys))
-	for _, key := range editableTFVarKeys {
+func CurrentEditablePreflightConfig() EditablePreflightConfig {
+	tfVars := make(map[string]string, len(EditableTFVarKeys))
+	for _, key := range EditableTFVarKeys {
 		tfVars[key] = strings.TrimSpace(viper.GetString("tf_vars." + key))
 	}
-	if prefix, err := normalizeAWSPrefix(tfVars["aws_prefix"]); err == nil {
+	if prefix, err := NormalizeAWSPrefix(tfVars["aws_prefix"]); err == nil {
 		tfVars["aws_prefix"] = prefix
 	}
 
@@ -42,7 +42,7 @@ func currentEditablePreflightConfig() editablePreflightConfig {
 		distro = "auto"
 	}
 
-	return editablePreflightConfig{
+	return EditablePreflightConfig{
 		Distro:            distro,
 		BootstrapPassword: viper.GetString("rancher.bootstrap_password"),
 		PreloadImages:     viper.GetBool("rke2.preload_images"),
@@ -50,7 +50,7 @@ func currentEditablePreflightConfig() editablePreflightConfig {
 	}
 }
 
-func normalizePreflightConfigUpdate(update *preflightConfigUpdate) error {
+func NormalizePreflightConfigUpdate(update *PreflightConfigUpdate) error {
 	if update.TFVars == nil && strings.TrimSpace(update.Distro) == "" && strings.TrimSpace(update.BootstrapPassword) == "" {
 		return nil
 	}
@@ -74,7 +74,7 @@ func normalizePreflightConfigUpdate(update *preflightConfigUpdate) error {
 		return nil
 	}
 
-	normalizedPrefix, err := normalizeAWSPrefix(update.TFVars["aws_prefix"])
+	normalizedPrefix, err := NormalizeAWSPrefix(update.TFVars["aws_prefix"])
 	if err != nil {
 		return err
 	}
@@ -82,13 +82,13 @@ func normalizePreflightConfigUpdate(update *preflightConfigUpdate) error {
 	if strings.TrimSpace(update.TFVars["aws_pem_key_name"]) == "" {
 		return fmt.Errorf("tf_vars.aws_pem_key_name must be set")
 	}
-	for _, key := range editableTFVarKeys {
+	for _, key := range EditableTFVarKeys {
 		update.TFVars[key] = strings.TrimSpace(update.TFVars[key])
 	}
 	return nil
 }
 
-func validateAWSPemKeyNameConfig() error {
+func ValidateAWSPemKeyNameConfig() error {
 	if strings.TrimSpace(viper.GetString("tf_vars.aws_pem_key_name")) == "" {
 		return fmt.Errorf("tf_vars.aws_pem_key_name must be set")
 	}

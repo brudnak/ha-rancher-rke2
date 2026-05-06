@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/brudnak/ha-rancher-rke2/terratest/settings"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
@@ -27,7 +28,7 @@ tf_vars:
 		t.Fatalf("failed to write temp config: %v", err)
 	}
 
-	if err := updateAutoModeConfigFile(configPath, preflightConfigUpdate{
+	if err := updateAutoModeConfigFile(configPath, settings.PreflightConfigUpdate{
 		Versions: []string{"2.14.1-alpha3", "2.13.5-alpha3", "2.12.9-alpha3"},
 	}); err != nil {
 		t.Fatalf("updateAutoModeConfigFile returned error: %v", err)
@@ -91,7 +92,7 @@ tf_vars:
 		t.Fatalf("failed to write temp config: %v", err)
 	}
 
-	if err := updateAutoModeConfigFile(configPath, preflightConfigUpdate{
+	if err := updateAutoModeConfigFile(configPath, settings.PreflightConfigUpdate{
 		Versions:              []string{"v2.14-head"},
 		CustomHostnameEnabled: true,
 		CustomHostnameInput:   "https://Brudnak.qa.rancher.space/saml",
@@ -123,7 +124,7 @@ tf_vars:
 	if parsed.TFVars["custom_hostname_prefix"] != "brudnak" {
 		t.Fatalf("expected custom_hostname_prefix brudnak, got %#v", parsed.TFVars["custom_hostname_prefix"])
 	}
-	if got := viper.GetString(customHostnameConfigKey); got != "brudnak" {
+	if got := viper.GetString(settings.CustomHostnameConfigKey); got != "brudnak" {
 		t.Fatalf("expected viper custom hostname brudnak, got %q", got)
 	}
 }
@@ -175,7 +176,7 @@ tf_vars:
 		"aws_pem_key_name":      "qa-key",
 		"aws_route53_fqdn":      "qa.rancher.space",
 	}
-	if err := updateAutoModeConfigFile(configPath, preflightConfigUpdate{
+	if err := updateAutoModeConfigFile(configPath, settings.PreflightConfigUpdate{
 		Versions:          []string{"head"},
 		Distro:            "community",
 		BootstrapPassword: "new-password",
@@ -231,9 +232,9 @@ func TestValidateCustomHostnameConfigRequiresSingleHA(t *testing.T) {
 	t.Cleanup(viper.Reset)
 	viper.Reset()
 	viper.Set("tf_vars.aws_route53_fqdn", "qa.rancher.space")
-	viper.Set(customHostnameConfigKey, "brudnak")
+	viper.Set(settings.CustomHostnameConfigKey, "brudnak")
 
-	err := validateCustomHostnameConfig(2)
+	err := settings.ValidateCustomHostnameConfig(2)
 	if err == nil {
 		t.Fatal("expected custom hostname with multiple HAs to fail validation")
 	}
@@ -242,9 +243,9 @@ func TestValidateCustomHostnameConfigRequiresSingleHA(t *testing.T) {
 func TestConfiguredCustomHostnameTreatsQuotedEmptyAsUnset(t *testing.T) {
 	t.Cleanup(viper.Reset)
 	viper.Reset()
-	viper.Set(customHostnameConfigKey, ` '""' `)
+	viper.Set(settings.CustomHostnameConfigKey, ` '""' `)
 
-	prefix, err := configuredCustomHostnamePrefix()
+	prefix, err := settings.ConfiguredCustomHostnamePrefix()
 	if err != nil {
 		t.Fatalf("configuredCustomHostnamePrefix returned error: %v", err)
 	}
@@ -254,7 +255,7 @@ func TestConfiguredCustomHostnameTreatsQuotedEmptyAsUnset(t *testing.T) {
 }
 
 func TestNormalizeAWSPrefixRequiresTwoOrThreeLetters(t *testing.T) {
-	prefix, err := normalizeAWSPrefix("ATB")
+	prefix, err := settings.NormalizeAWSPrefix("ATB")
 	if err != nil {
 		t.Fatalf("expected ATB to be valid, got %v", err)
 	}
@@ -263,7 +264,7 @@ func TestNormalizeAWSPrefixRequiresTwoOrThreeLetters(t *testing.T) {
 	}
 
 	for _, value := range []string{"a", "abcd", "a1", ""} {
-		if _, err := normalizeAWSPrefix(value); err == nil {
+		if _, err := settings.NormalizeAWSPrefix(value); err == nil {
 			t.Fatalf("expected %q to be invalid", value)
 		}
 	}

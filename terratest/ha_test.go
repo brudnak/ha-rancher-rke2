@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/brudnak/ha-rancher-rke2/terratest/settings"
 	"github.com/gruntwork-io/terratest/modules/terraform"
 	"github.com/spf13/viper"
 )
@@ -23,10 +24,10 @@ func TestHaSetup(t *testing.T) {
 	if totalHAs < 1 {
 		t.Fatal("total_has must be at least 1")
 	}
-	if err := validateAWSPrefixConfig(); err != nil {
+	if err := settings.ValidateAWSPrefixConfig(); err != nil {
 		t.Fatalf("AWS prefix preflight failed: %v", err)
 	}
-	if err := validateAWSPemKeyNameConfig(); err != nil {
+	if err := settings.ValidateAWSPemKeyNameConfig(); err != nil {
 		t.Fatalf("AWS PEM key preflight failed: %v", err)
 	}
 
