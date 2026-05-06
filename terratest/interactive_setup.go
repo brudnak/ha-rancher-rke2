@@ -208,6 +208,19 @@ func (s *interactiveServer) registerHandlers(mux *http.ServeMux, initialVersions
 		})
 	})
 
+	mux.HandleFunc("/api/readiness", func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorized(r) {
+			http.Error(w, "invalid interactive setup token", http.StatusForbidden)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		writeJSON(w, collectSystemReadiness(s.configPath))
+	})
+
 	mux.HandleFunc("/submit", func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorized(r) {
 			http.Error(w, "invalid interactive setup token", http.StatusForbidden)
@@ -215,6 +228,12 @@ func (s *interactiveServer) registerHandlers(mux *http.ServeMux, initialVersions
 		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed: "+r.Method, http.StatusMethodNotAllowed)
+			return
+		}
+
+		readiness := collectSystemReadiness(s.configPath)
+		if !readiness.Ready {
+			http.Error(w, readiness.Summary, http.StatusBadRequest)
 			return
 		}
 

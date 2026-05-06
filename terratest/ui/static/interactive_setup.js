@@ -13,6 +13,7 @@ let customHostname = ''
 let submitting = false
 let responseSubmitting = false
 let pendingCompletionShouldContinue = true
+let systemReadiness = null
 
 const rowClass = 'grid gap-3 rounded-xl border border-zinc-200 bg-white p-3 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-none sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center'
 const inputClass = 'w-full rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 font-medium text-zinc-950 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/50 dark:text-zinc-100'
@@ -39,6 +40,10 @@ const distroSelectEl = document.getElementById('distroSelect')
 const bootstrapPasswordInputEl = document.getElementById('bootstrapPasswordInput')
 const bootstrapPasswordToggleEl = document.getElementById('bootstrapPasswordToggle')
 const preloadImagesToggleEl = document.getElementById('preloadImagesToggle')
+const systemReadinessDetailsEl = document.getElementById('systemReadinessDetails')
+const systemReadinessBadgeEl = document.getElementById('systemReadinessBadge')
+const systemReadinessSummaryEl = document.getElementById('systemReadinessSummary')
+const systemReadinessItemsEl = document.getElementById('systemReadinessItems')
 const tfVarInputEls = Array.from(document.querySelectorAll('input[data-tf-var]'))
 const lockedFieldInputEls = Array.from(document.querySelectorAll('input[data-locked-field]'))
 const lockToggleEls = Array.from(document.querySelectorAll('button[data-lock-toggle]'))
@@ -185,6 +190,103 @@ const showNoticeModal = ({ title, body, confirmText = 'Got it' }) => showConfirm
   confirmText,
   showCancel: false
 })
+
+const readinessStyles = status => {
+  const styles = {
+    ok: {
+      icon: '<path d="M20 6 9 17l-5-5"></path>',
+      iconClass: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
+      badgeClass: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
+    },
+    warning: {
+      icon: '<path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"></path>',
+      iconClass: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
+      badgeClass: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'
+    },
+    error: {
+      icon: '<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path>',
+      iconClass: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
+      badgeClass: 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300'
+    },
+    checking: {
+      icon: '',
+      iconClass: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300',
+      badgeClass: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300'
+    }
+  }
+
+  return styles[status] || styles.checking
+}
+
+const renderSystemReadiness = readiness => {
+  systemReadiness = readiness
+  const items = Array.isArray(readiness?.items) ? readiness.items : []
+  const hasError = items.some(item => item.status === 'error')
+  const hasWarning = items.some(item => item.status === 'warning')
+  const status = hasError ? 'error' : hasWarning ? 'warning' : readiness?.ready ? 'ok' : 'checking'
+  const style = readinessStyles(status)
+  const label = status === 'ok' ? 'Ready' : status === 'warning' ? 'Ready with warnings' : status === 'error' ? 'Action needed' : 'Checking'
+
+  systemReadinessBadgeEl.className = `inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${style.badgeClass}`
+  systemReadinessBadgeEl.textContent = status === 'ok' ? 'Ready' : label
+  systemReadinessSummaryEl.textContent = readiness?.summary || 'Checking local tools, config, and required environment.'
+
+  if (!items.length) {
+    systemReadinessItemsEl.innerHTML = '<div class="rounded-lg border border-zinc-200 bg-white px-3.5 py-3 text-sm text-zinc-500 dark:border-white/10 dark:bg-zinc-950/30 dark:text-zinc-400">Checking system readiness...</div>'
+    return
+  }
+
+  systemReadinessItemsEl.innerHTML = items.map(item => {
+    const itemStyle = readinessStyles(item.status)
+    const version = item.version ? `<span class="text-zinc-500 dark:text-zinc-400">${escapeHtml(item.version)}</span>` : ''
+    const baseline = item.recommended ? `<div class="mt-1 text-xs text-zinc-500 dark:text-zinc-500">Recommended ${escapeHtml(item.recommended)}${item.minimum ? ` • minimum ${escapeHtml(item.minimum)}` : ''}</div>` : ''
+
+    return `
+      <div class="grid gap-3 rounded-lg border border-zinc-200 bg-white px-3.5 py-3 dark:border-white/10 dark:bg-zinc-950/30 sm:grid-cols-[auto_minmax(0,1fr)]">
+        <div class="flex h-8 w-8 items-center justify-center rounded-full ${itemStyle.iconClass}">
+          ${item.status === 'checking' ? '<span class="spinner !h-4 !w-4 !border-2"></span>' : `<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${itemStyle.icon}</svg>`}
+        </div>
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-2">
+            <div class="font-semibold text-zinc-950 dark:text-zinc-100">${escapeHtml(item.name || 'Check')}</div>
+            ${version}
+          </div>
+          <div class="mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-400">${escapeHtml(item.detail || '')}</div>
+          ${baseline}
+        </div>
+      </div>
+    `
+  }).join('')
+}
+
+const loadSystemReadiness = async () => {
+  renderSystemReadiness({
+    ready: false,
+    summary: 'Checking local tools, config, and required environment.',
+    items: []
+  })
+
+  try {
+    const response = await fetch(`/api/readiness?token=${encodeURIComponent(token)}`, {
+      cache: 'no-store',
+      headers: { 'Accept': 'application/json' }
+    })
+    if (!response.ok) {
+      throw new Error(await response.text() || 'System readiness check failed.')
+    }
+    renderSystemReadiness(await response.json())
+  } catch (error) {
+    renderSystemReadiness({
+      ready: false,
+      summary: 'System readiness check failed',
+      items: [{
+        name: 'System readiness',
+        status: 'error',
+        detail: error instanceof Error ? error.message : 'System readiness check failed.'
+      }]
+    })
+  }
+}
 
 const renderEditableConfig = () => {
   distroSelectEl.value = config.distro || 'auto'
@@ -463,6 +565,21 @@ const prepareSetupSubmit = async event => {
     return
   }
 
+  if (!systemReadiness || systemReadiness.ready !== true) {
+    await loadSystemReadiness()
+  }
+
+  if (!systemReadiness || systemReadiness.ready !== true) {
+    systemReadinessDetailsEl.open = true
+    const message = systemReadiness?.summary || 'System readiness checks must pass before resolving the plan.'
+    showValidationError(message, systemReadinessDetailsEl)
+    await showNoticeModal({
+      title: 'System readiness needs attention',
+      body: 'Fix the missing required system checks before resolving the Rancher plan. Warnings are okay, but errors block continuing.'
+    })
+    return
+  }
+
   clearValidationError()
 
   const tfVars = collectTFVars()
@@ -727,4 +844,5 @@ document.body.addEventListener('htmx:afterRequest', event => {
 renderCustomHostname()
 renderEditableConfig()
 setTheme(currentTheme(), false)
+loadSystemReadiness()
 connectEventStream()

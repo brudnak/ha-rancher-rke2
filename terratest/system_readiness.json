@@ -1,0 +1,48 @@
+{
+  "tools": [
+    {
+      "name": "Go",
+      "command": "go",
+      "args": ["version"],
+      "version_pattern": "go([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+      "minimum_version": "1.26.1",
+      "recommended_version": "1.26.1"
+    },
+    {
+      "name": "kubectl",
+      "command": "kubectl",
+      "args": ["version", "--client=true"],
+      "version_pattern": "Client Version: v?([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+      "minimum_version": "1.32.0",
+      "recommended_version": "1.35.3"
+    },
+    {
+      "name": "Helm",
+      "command": "helm",
+      "args": ["version", "--short"],
+      "version_pattern": "v?([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+      "minimum_version": "3.14.0",
+      "recommended_version": "4.1.3"
+    },
+    {
+      "name": "Terraform",
+      "command": "terraform",
+      "args": ["version", "-json"],
+      "json_version_key": "terraform_version",
+      "minimum_version": "1.5.0",
+      "recommended_version": "1.14.8"
+    }
+  ],
+  "required_env": [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY"
+  ],
+  "optional_env_pairs": [
+    {
+      "name": "Docker Hub credentials",
+      "keys": ["DOCKERHUB_USERNAME", "DOCKERHUB_PASSWORD"],
+      "warn_when_absent": true,
+      "absent_detail": "Not set. Optional, but provisioning may fail if Docker Hub rate limits anonymous pulls."
+    }
+  ]
+}

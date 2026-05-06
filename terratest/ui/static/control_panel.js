@@ -1,6 +1,7 @@
 const setupData = JSON.parse(document.getElementById('control-panel-data')?.textContent || '{}')
 const token = setupData.token || ''
 
+const clustersSectionEl = document.getElementById('clustersSection')
 const clustersEl = document.getElementById('clusters')
 const refreshStatusEl = document.getElementById('refreshStatus')
 const logStatusEl = document.getElementById('logStatus')
@@ -18,7 +19,9 @@ const liveLogStateLabelEl = document.getElementById('liveLogStateLabel')
 const openLogViewerBtnEl = document.getElementById('openLogViewerBtn')
 const stopStreamBtnEl = document.getElementById('stopStreamBtn')
 const cleanupStatusEl = document.getElementById('cleanupStatus')
+const cleanupActionsEl = document.getElementById('cleanupActions')
 const cleanupConfirmEl = document.getElementById('cleanupConfirm')
+const cleanupBtnEl = document.getElementById('cleanupBtn')
 const openCleanupLogsBtnEl = document.getElementById('openCleanupLogsBtn')
 const cleanupCostEl = document.getElementById('cleanupCost')
 const themeToggleEl = document.getElementById('themeToggle')
@@ -342,7 +345,7 @@ const badge = label => `<span class="inline-flex items-center rounded-md bg-zinc
 const metaItem = (label, value) => `
   <div class="min-w-0">
     <div class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">${escapeHtml(label)}</div>
-    <div class="mt-1 break-words text-sm font-medium text-zinc-800 dark:text-zinc-200">${value}</div>
+    <div class="mt-1 break-words text-sm font-medium text-zinc-800 [overflow-wrap:anywhere] dark:text-zinc-200">${value}</div>
   </div>
 `
 
@@ -514,6 +517,32 @@ const renderCluster = cluster => {
 }
 
 const renderClusters = state => {
+  const cleanup = state?.cleanup || {}
+
+  if (cleanup.finishedAt && !cleanup.error) {
+    clustersSectionEl.classList.add('hidden')
+    clustersEl.innerHTML = ''
+    return
+  }
+
+  clustersSectionEl.classList.remove('hidden')
+
+  if (cleanup.running) {
+    clustersEl.innerHTML = `
+      <div class="rounded-2xl border border-sky-200 bg-sky-50 p-6 text-center dark:border-sky-500/20 dark:bg-sky-500/10">
+        <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">
+          <span class="spinner"></span>
+        </div>
+        <h3 class="mt-4 text-lg font-semibold tracking-tight text-sky-950 dark:text-sky-100">Infrastructure is being torn down</h3>
+        <p class="mx-auto mt-2 max-w-2xl text-sm leading-6 text-sky-800/80 dark:text-sky-200/80">
+          Cleanup is destroying the Terraform resources and removing local generated output. Cluster details are paused so the panel does not show stale unavailable infrastructure.
+        </p>
+        <button type="button" data-action="open-cleanup-logs" class="mt-4 rounded-lg border border-sky-200 bg-white px-4 py-2 text-sm font-semibold text-sky-800 shadow-sm hover:bg-sky-50 dark:border-sky-500/30 dark:bg-white/[0.06] dark:text-sky-200 dark:hover:bg-white/[0.1]">Open cleanup logs</button>
+      </div>
+    `
+    return
+  }
+
   const items = clusterItems(state)
 
   if (!items.length) {
@@ -593,20 +622,36 @@ const renderCleanupCost = (cleanup, output) => {
 
 const renderCleanup = cleanup => {
   const output = cleanup && Array.isArray(cleanup.output) ? cleanup.output : []
+  const running = Boolean(cleanup?.running)
+  const success = Boolean(cleanup?.finishedAt && !cleanup?.error)
+  const failed = Boolean(cleanup?.error)
 
-  if (cleanup && cleanup.running) {
+  if (running) {
     cleanupStatusEl.className = 'inline-flex items-center justify-center rounded-full bg-sky-100 px-3 py-1.5 text-xs font-semibold text-sky-700 dark:bg-sky-500/15 dark:text-sky-300'
     cleanupStatusEl.innerHTML = `<span class="spinner mr-2"></span>Cleanup running${cleanup.startedAt ? ` since ${new Date(cleanup.startedAt).toLocaleTimeString()}` : ''}`
-  } else if (cleanup && cleanup.error) {
+  } else if (failed) {
     cleanupStatusEl.className = 'inline-flex items-center justify-center rounded-full bg-rose-100 px-3 py-1.5 text-xs font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-300'
     cleanupStatusEl.textContent = 'Cleanup finished with error'
-  } else if (cleanup && cleanup.finishedAt) {
+  } else if (success) {
     cleanupStatusEl.className = 'inline-flex items-center justify-center rounded-full bg-emerald-100 px-3 py-1.5 text-xs font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
     cleanupStatusEl.textContent = `Cleanup finished successfully at ${new Date(cleanup.finishedAt).toLocaleTimeString()}`
   } else {
     cleanupStatusEl.className = 'inline-flex items-center justify-center rounded-full bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-600 dark:bg-white/[0.06] dark:text-zinc-300'
     cleanupStatusEl.textContent = 'Idle'
   }
+
+  cleanupActionsEl.className = success
+    ? 'mx-auto mt-5 flex max-w-3xl justify-center'
+    : 'mx-auto mt-5 grid max-w-3xl gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto]'
+
+  cleanupConfirmEl.hidden = success
+  cleanupBtnEl.hidden = success
+  cleanupConfirmEl.disabled = running
+  cleanupBtnEl.disabled = running
+  cleanupBtnEl.textContent = running ? 'Cleanup running' : 'Run cleanup'
+  cleanupBtnEl.className = running
+    ? 'rounded-lg bg-zinc-200 px-4 py-2.5 text-sm font-semibold text-zinc-500 shadow-sm dark:bg-white/[0.06] dark:text-zinc-400'
+    : 'rounded-lg bg-rose-500 px-4 py-2.5 text-sm font-semibold text-white shadow-sm shadow-rose-500/20 hover:bg-rose-400'
 
   renderCleanupCost(cleanup, output)
 
@@ -876,6 +921,17 @@ const runCleanup = async () => {
 
   cleanupConfirmEl.value = ''
   cleanupStatusEl.textContent = 'Cleanup requested...'
+  lastState = {
+    ...(lastState || {}),
+    cleanup: {
+      ...(lastState?.cleanup || {}),
+      running: true,
+      output: ['[control-panel] Cleanup requested...'],
+      startedAt: new Date().toISOString()
+    }
+  }
+  renderClusters(lastState)
+  renderCleanup(lastState.cleanup)
   setCleanupLogContext()
   setLiveLogState('cleanupRunning')
   rawLogText = '[control-panel] Cleanup requested...'
@@ -892,6 +948,11 @@ clustersEl.addEventListener('click', event => {
 
   const action = button.dataset.action
   const clusterId = button.dataset.cluster
+
+  if (action === 'open-cleanup-logs') {
+    openCleanupLogs()
+    return
+  }
 
   if (action === 'toggle-cluster') {
     collapsedClusters.set(clusterId, collapsedClusters.get(clusterId) !== true)
