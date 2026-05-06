@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rancher Local Control Panel</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/static/control_panel_theme.js"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    button:focus-visible,
+    input:focus-visible {
+      outline: 2px solid rgb(16 185 129);
+      outline-offset: 2px;
+    }
+    .spinner {
+      width: 1rem;
+      height: 1rem;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 999px;
+      animation: spin 0.85s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="min-h-screen bg-zinc-100 text-zinc-950 antialiased dark:bg-zinc-950 dark:text-zinc-100">
+  <main class="min-h-screen px-4 py-8 sm:px-6 lg:px-8">
+    <div class="mx-auto max-w-[1500px]">
+      <header class="mb-6 flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+        <div class="min-w-0">
+          <div class="mb-4 inline-flex items-center rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs font-medium text-zinc-500 shadow-sm dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
+            Local control panel
+          </div>
+          <h1 class="text-3xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">Rancher Local Control Panel</h1>
+          <p class="mt-3 max-w-3xl text-sm leading-6 text-zinc-600 dark:text-zinc-400 sm:text-base">
+            Local-only viewer for active HA Rancher runs, downstream clusters, kubeconfigs, logs, and cleanup.
+          </p>
+        </div>
+        <div class="flex shrink-0 flex-wrap items-center gap-2">
+          <button id="themeToggle" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white px-3.5 py-2 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200 dark:hover:bg-white/[0.1]" aria-label="Toggle color theme">
+            <svg id="themeSunIcon" xmlns="http://www.w3.org/2000/svg" class="hidden h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path d="M12 2v2"></path>
+              <path d="M12 20v2"></path>
+              <path d="m4.93 4.93 1.41 1.41"></path>
+              <path d="m17.66 17.66 1.41 1.41"></path>
+              <path d="M2 12h2"></path>
+              <path d="M20 12h2"></path>
+              <path d="m6.34 17.66-1.41 1.41"></path>
+              <path d="m19.07 4.93-1.41 1.41"></path>
+            </svg>
+            <svg id="themeMoonIcon" xmlns="http://www.w3.org/2000/svg" class="hidden h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"></path>
+            </svg>
+            <span id="themeToggleLabel">Theme</span>
+          </button>
+          <button id="refreshBtn" type="button" class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-emerald-500/20 hover:bg-emerald-400">Refresh</button>
+          <button id="stopBtn" type="button" hx-post="/api/shutdown" hx-headers='{"X-Control-Panel-Token":"{{.Token}}"}' hx-swap="none" class="rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200 dark:hover:bg-white/[0.1]">Stop panel</button>
+        </div>
+      </header>
+
+      <div class="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(380px,0.85fr)]">
+        <section class="min-w-0 overflow-hidden rounded-2xl border border-zinc-200 bg-white p-4 shadow-xl shadow-zinc-200/60 dark:border-white/10 dark:bg-zinc-900/80 dark:shadow-black/30 sm:p-5">
+          <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <h2 class="text-lg font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">Clusters</h2>
+            <div id="refreshStatus" class="text-sm text-zinc-500 dark:text-zinc-400">Waiting for first refresh...</div>
+          </div>
+          <div id="clusters" class="grid min-w-0 gap-4">
+            <div class="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">Loading clusters...</div>
+          </div>
+        </section>
+
+        <aside class="grid min-w-0 content-start gap-6">
+          <section class="min-w-0 rounded-2xl border border-zinc-200 bg-white p-4 shadow-xl shadow-zinc-200/60 dark:border-white/10 dark:bg-zinc-900/80 dark:shadow-black/30 sm:p-5">
+            <div class="mb-4 flex items-center justify-between gap-3">
+              <h2 class="text-lg font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">Logs</h2>
+              <div class="flex gap-2">
+                <button id="stopStreamBtn" type="button" class="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200 dark:hover:bg-white/[0.1]">Stop</button>
+                <button id="clearLogsBtn" type="button" class="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200 dark:hover:bg-white/[0.1]">Clear</button>
+              </div>
+            </div>
+            <p id="logStatus" class="mb-3 text-sm text-zinc-500 dark:text-zinc-400">Select a Rancher, webhook, or downstream pod to view logs.</p>
+            <pre id="logBox" class="h-[min(44vh,520px)] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-zinc-200 bg-zinc-50 p-4 font-mono text-xs leading-6 text-zinc-800 shadow-inner dark:border-white/10 dark:bg-zinc-950 dark:text-zinc-200"></pre>
+          </section>
+
+          <section class="min-w-0 rounded-2xl border border-zinc-200 bg-white p-4 shadow-xl shadow-zinc-200/60 dark:border-white/10 dark:bg-zinc-900/80 dark:shadow-black/30 sm:p-5">
+            <h2 class="text-lg font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">Cleanup</h2>
+            <p class="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-400">Calls the canonical cleanup flow. Type <code>cleanup</code> to enable it.</p>
+            <div class="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <input id="cleanupConfirm" type="text" autocomplete="off" placeholder='Type "cleanup" to enable' class="w-full rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-sm font-medium text-zinc-950 outline-none focus:border-emerald-400 dark:border-white/10 dark:bg-zinc-950/50 dark:text-zinc-100" />
+              <button id="cleanupBtn" type="button" class="rounded-lg bg-rose-500 px-4 py-2.5 text-sm font-semibold text-white shadow-sm shadow-rose-500/20 hover:bg-rose-400">Run cleanup</button>
+            </div>
+            <div id="cleanupStatus" class="mt-3 text-sm font-medium text-zinc-600 dark:text-zinc-400">Idle</div>
+            <pre id="cleanupBox" class="mt-3 h-52 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-zinc-200 bg-zinc-50 p-4 font-mono text-xs leading-6 text-zinc-700 dark:border-white/10 dark:bg-zinc-950/40 dark:text-zinc-300"></pre>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </main>
+
+  <script type="application/json" id="control-panel-data">{"token":"{{.Token}}"}</script>
+  <script src="/static/control_panel.js" defer></script>
+</body>
+</html>
