@@ -489,6 +489,39 @@ func TestBuildAutoHelmCommandUpgradeUsesSameResolvedSettings(t *testing.T) {
 	}
 }
 
+func TestBuildAutoHelmCommandShellQuotesBootstrapPassword(t *testing.T) {
+	password := `abc&Vfw8_Qr7*YVh1DE'with,comma\slash`
+	command := buildAutoHelmCommand(
+		rancherHelmOperationInstall,
+		"rancher-latest",
+		"2.14.1",
+		password,
+		"",
+		"",
+		"",
+		true,
+	)
+
+	expected := `--set-string 'bootstrapPassword=abc&Vfw8_Qr7*YVh1DE'\''with\,comma\\slash'`
+	if !strings.Contains(command, expected) {
+		t.Fatalf("expected shell-quoted bootstrap password %q, got:\n%s", expected, command)
+	}
+	if strings.Contains(command, "--set bootstrapPassword=") {
+		t.Fatalf("expected bootstrap password to use --set-string, got:\n%s", command)
+	}
+	if strings.Index(command, "--set-string 'bootstrapPassword=") > strings.Index(command, "--set tls=external") {
+		t.Fatalf("expected bootstrap password before tls=external to remain part of the same helm command, got:\n%s", command)
+	}
+}
+
+func TestShellQuoteHelmSetString(t *testing.T) {
+	got := shellQuoteHelmSetString("bootstrapPassword", `a'b,c\d`)
+	want := `'bootstrapPassword=a'\''b\,c\\d'`
+	if got != want {
+		t.Fatalf("shellQuoteHelmSetString() = %q, want %q", got, want)
+	}
+}
+
 func TestNormalizeHelmImageSettingsLeavesOptimusAlphaOverridesDocShaped(t *testing.T) {
 	settings := normalizeHelmImageSettings(
 		"optimus-rancher-alpha",

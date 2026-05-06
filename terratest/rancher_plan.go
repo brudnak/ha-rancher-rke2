@@ -1059,7 +1059,7 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 		"  --namespace cattle-system \\",
 		"  --version " + chartVersion + " \\",
 		"  --set hostname=placeholder \\",
-		"  --set bootstrapPassword=" + bootstrapPassword + " \\",
+		"  --set-string " + shellQuoteHelmSetString("bootstrapPassword", bootstrapPassword) + " \\",
 		"  --set tls=external \\",
 		"  --set global.cattle.psp.enabled=false \\",
 		"  --set agentTLSMode=system-store",
@@ -1110,6 +1110,23 @@ func buildAutoHelmCommand(operation, chartRepoAlias, chartVersion, bootstrapPass
 	}
 
 	return strings.Join(baseSettings, "\n")
+}
+
+func shellQuoteHelmSetString(key, value string) string {
+	return shellQuote(key + "=" + escapeHelmSetValue(value))
+}
+
+func escapeHelmSetValue(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `,`, `\,`)
+	return value
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 type helmImageSettings struct {
