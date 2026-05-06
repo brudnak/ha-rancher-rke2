@@ -61,6 +61,44 @@ func TestKnownRancherHelmRepoURLs(t *testing.T) {
 	}
 }
 
+func TestRancherHelmCommandUsesExternalTLS(t *testing.T) {
+	tests := []string{
+		`helm install rancher rancher-latest/rancher --set tls=external`,
+		`helm install rancher rancher-latest/rancher --set=tls=external`,
+		`helm install rancher rancher-latest/rancher --set-string tls=external`,
+		`helm install rancher rancher-latest/rancher --set-string=tls=external`,
+		`helm install rancher rancher-latest/rancher --set 'tls=external'`,
+		`helm install rancher rancher-latest/rancher --set tls=external,hostname=example.test`,
+	}
+
+	for _, command := range tests {
+		if !rancherHelmCommandUsesExternalTLS(command) {
+			t.Fatalf("expected command to use external TLS:\n%s", command)
+		}
+	}
+}
+
+func TestValidateRancherHelmCommandsUseExternalTLSRejectsIngressTLSDefault(t *testing.T) {
+	err := validateRancherHelmCommandsUseExternalTLS([]string{
+		`helm install rancher rancher-latest/rancher --set hostname=placeholder`,
+	})
+	if err == nil {
+		t.Fatal("expected missing tls=external to fail")
+	}
+	if !strings.Contains(err.Error(), "tls=external") {
+		t.Fatalf("expected error to mention tls=external, got %v", err)
+	}
+}
+
+func TestValidateRancherHelmCommandsUseExternalTLSRejectsSecretIngressTLS(t *testing.T) {
+	err := validateRancherHelmCommandsUseExternalTLS([]string{
+		`helm install rancher rancher-latest/rancher --set ingress.tls.source=secret`,
+	})
+	if err == nil {
+		t.Fatal("expected ingress TLS secret mode to fail")
+	}
+}
+
 func TestBuildRKE2ImagesDownloadCommandRetriesDownloadsAndValidatesChecksum(t *testing.T) {
 	command := buildRKE2ImagesDownloadCommand("v1.34.6+rke2r3")
 

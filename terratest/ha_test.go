@@ -36,6 +36,9 @@ func TestHaSetup(t *testing.T) {
 		t.Fatalf("Number of Helm commands (%d) does not match the number of HA instances (%d). Please ensure you have exactly %d Helm commands in your configuration.",
 			len(helmCommands), totalHAs, totalHAs)
 	}
+	if err := validateRancherHelmCommandsUseExternalTLS(helmCommands); err != nil {
+		t.Fatalf("Rancher Helm command preflight failed before provisioning infrastructure: %v", err)
+	}
 
 	if err := validateLocalToolingPreflight(helmCommands); err != nil {
 		t.Fatalf("Local tooling preflight failed before provisioning infrastructure: %v", err)

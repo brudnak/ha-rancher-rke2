@@ -3,6 +3,7 @@ package test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +40,41 @@ func TestCleanupAutomationOutputRemovesWorkspaceFolder(t *testing.T) {
 
 	if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
 		t.Fatalf("expected automation output dir to be removed, stat err=%v", err)
+	}
+}
+
+func TestCreateInstallScriptFailsFastAndCreatesNamespaceIdempotently(t *testing.T) {
+	tempDir := t.TempDir()
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get original dir: %v", err)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir to temp dir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Fatalf("failed to restore original dir: %v", err)
+		}
+	})
+
+	CreateInstallScript("helm install rancher rancher-latest/rancher", "high-availability-1")
+
+	scriptPath := filepath.Join(tempDir, "high-availability-1", "install.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("failed to read generated install script: %v", err)
+	}
+	script := string(data)
+
+	for _, want := range []string{
+		"set -euo pipefail",
+		"kubectl create namespace cattle-system --dry-run=client -o yaml | kubectl apply -f -",
+		"helm install rancher rancher-latest/rancher",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("generated install script missing %q:\n%s", want, script)
+		}
 	}
 }
 

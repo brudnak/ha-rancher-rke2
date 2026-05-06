@@ -59,6 +59,8 @@ func automationOutputPath(name string) string {
 
 func CreateInstallScript(helmCommand, haDir string) {
 	installScript := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+
 # First make sure we're using the right kubeconfig
 if [ ! -f "kube_config.yaml" ]; then
   echo "ERROR: kube_config.yaml not found. Make sure you're in the right directory."
@@ -79,7 +81,7 @@ fi
 helm repo update
 
 echo "Creating namespace..."
-kubectl create namespace cattle-system
+kubectl create namespace cattle-system --dry-run=client -o yaml | kubectl apply -f -
 
 echo "Installing Rancher..."
 %s

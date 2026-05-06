@@ -49,6 +49,49 @@ func validateLocalToolingPreflight(helmCommands []string) error {
 	return nil
 }
 
+func validateRancherHelmCommandsUseExternalTLS(helmCommands []string) error {
+	for i, helmCommand := range helmCommands {
+		if rancherHelmCommandUsesExternalTLS(helmCommand) {
+			continue
+		}
+		return fmt.Errorf("rancher.helm_commands[%d] must include --set tls=external because this AWS setup terminates public TLS at the ALB and forwards HTTP/80 to Rancher", i)
+	}
+	return nil
+}
+
+func rancherHelmCommandUsesExternalTLS(helmCommand string) bool {
+	fields := strings.Fields(helmCommand)
+	for i, field := range fields {
+		field = cleanHelmCommandField(field)
+		switch {
+		case field == "--set" || field == "--set-string":
+			if i+1 < len(fields) && isExternalTLSHelmSet(cleanHelmCommandField(fields[i+1])) {
+				return true
+			}
+		case strings.HasPrefix(field, "--set="):
+			if isExternalTLSHelmSet(strings.TrimPrefix(field, "--set=")) {
+				return true
+			}
+		case strings.HasPrefix(field, "--set-string="):
+			if isExternalTLSHelmSet(strings.TrimPrefix(field, "--set-string=")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cleanHelmCommandField(field string) string {
+	field = strings.TrimSpace(field)
+	field = strings.TrimSuffix(field, `\`)
+	return strings.Trim(strings.TrimSpace(field), `"'`)
+}
+
+func isExternalTLSHelmSet(value string) bool {
+	value = cleanHelmCommandField(value)
+	return value == "tls=external" || strings.HasPrefix(value, "tls=external,")
+}
+
 var rancherHelmRepoURLs = map[string]string{
 	"rancher-latest":         "https://releases.rancher.com/server-charts/latest",
 	"rancher-stable":         "https://releases.rancher.com/server-charts/stable",
