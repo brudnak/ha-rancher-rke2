@@ -7,6 +7,18 @@ import (
 	"github.com/spf13/viper"
 )
 
+func TestControlPanelKubeconfigNames(t *testing.T) {
+	if got := localClusterID(2); got != "ha-2-local" {
+		t.Fatalf("expected local cluster id, got %q", got)
+	}
+	if got := downstreamClusterID(1, "fleet-default", "QA Cluster"); got != "ha-1-downstream-fleet-default-qa-cluster" {
+		t.Fatalf("expected downstream cluster id, got %q", got)
+	}
+	if got := safeKubeconfigDownloadName("QA Cluster"); got != "qa-cluster.yaml" {
+		t.Fatalf("expected safe kubeconfig download name, got %q", got)
+	}
+}
+
 func runHAControlPanelTest(t *testing.T) {
 	setupConfig(t)
 

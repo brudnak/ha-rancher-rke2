@@ -38,6 +38,9 @@ type localControlPanel struct {
 	cleanupStartedAt  *time.Time
 	cleanupFinishedAt *time.Time
 	cleanupError      string
+
+	rancherTokens             map[int]string
+	downstreamKubeconfigCache map[string]string
 }
 
 type panelState struct {
@@ -50,19 +53,27 @@ type panelClusterState struct {
 }
 
 type clusterView struct {
-	ID             int       `json:"id"`
-	Name           string    `json:"name"`
-	Version        string    `json:"version,omitempty"`
-	RancherURL     string    `json:"rancherUrl,omitempty"`
-	LoadBalancer   string    `json:"loadBalancer,omitempty"`
-	KubeconfigPath string    `json:"kubeconfigPath,omitempty"`
-	Available      bool      `json:"available"`
-	Reachable      bool      `json:"reachable"`
-	Error          string    `json:"error,omitempty"`
-	Pods           []podView `json:"pods"`
+	ID                  string    `json:"id"`
+	Type                string    `json:"type"`
+	HAIndex             int       `json:"haIndex"`
+	Name                string    `json:"name"`
+	Version             string    `json:"version,omitempty"`
+	RancherURL          string    `json:"rancherUrl,omitempty"`
+	LoadBalancer        string    `json:"loadBalancer,omitempty"`
+	Namespace           string    `json:"namespace,omitempty"`
+	ManagementClusterID string    `json:"managementClusterId,omitempty"`
+	KubeconfigPath      string    `json:"kubeconfigPath,omitempty"`
+	DownloadName        string    `json:"downloadName,omitempty"`
+	Provisioning        bool      `json:"provisioning,omitempty"`
+	ProvisioningMessage string    `json:"provisioningMessage,omitempty"`
+	Available           bool      `json:"available"`
+	Reachable           bool      `json:"reachable"`
+	Error               string    `json:"error,omitempty"`
+	Pods                []podView `json:"pods"`
 }
 
 type podView struct {
+	Namespace   string `json:"namespace,omitempty"`
 	Name        string `json:"name"`
 	Ready       string `json:"ready"`
 	Status      string `json:"status"`
@@ -88,6 +99,7 @@ type kubectlPodList struct {
 
 type kubectlPod struct {
 	Metadata struct {
+		Namespace         string    `json:"namespace"`
 		Name              string    `json:"name"`
 		CreationTimestamp time.Time `json:"creationTimestamp"`
 	} `json:"metadata"`
@@ -132,6 +144,39 @@ type kubectlPod struct {
 	} `json:"status"`
 }
 
+type provisioningClusterList struct {
+	Items []provisioningClusterItem `json:"items"`
+}
+
+type provisioningClusterItem struct {
+	Metadata struct {
+		Name      string `json:"name"`
+		Namespace string `json:"namespace"`
+	} `json:"metadata"`
+	Status struct {
+		ClusterName string `json:"clusterName"`
+	} `json:"status"`
+}
+
+type managementClusterList struct {
+	Items []managementClusterItem `json:"items"`
+}
+
+type managementClusterItem struct {
+	Metadata struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Spec struct {
+		DisplayName string `json:"displayName"`
+	} `json:"spec"`
+}
+
+type discoveredDownstreamCluster struct {
+	Name                string
+	Namespace           string
+	ManagementClusterID string
+}
+
 func newLocalControlPanel(totalHAs int) (*localControlPanel, error) {
 	token, err := randomConfirmationToken()
 	if err != nil {
@@ -153,13 +198,15 @@ func newLocalControlPanel(totalHAs int) (*localControlPanel, error) {
 	}
 
 	panel := &localControlPanel{
-		token:    token,
-		totalHAs: totalHAs,
-		repoRoot: repoRoot,
-		testDir:  testDir,
-		listener: listener,
-		baseURL:  fmt.Sprintf("http://%s/?token=%s", listener.Addr().String(), token),
-		doneCh:   make(chan error, 1),
+		token:                     token,
+		totalHAs:                  totalHAs,
+		repoRoot:                  repoRoot,
+		testDir:                   testDir,
+		listener:                  listener,
+		baseURL:                   fmt.Sprintf("http://%s/?token=%s", listener.Addr().String(), token),
+		doneCh:                    make(chan error, 1),
+		rancherTokens:             map[int]string{},
+		downstreamKubeconfigCache: map[string]string{},
 	}
 
 	mux := http.NewServeMux()
@@ -167,6 +214,7 @@ func newLocalControlPanel(totalHAs int) (*localControlPanel, error) {
 	mux.HandleFunc("/api/state", panel.handleState)
 	mux.HandleFunc("/api/logs", panel.handleLogs)
 	mux.HandleFunc("/api/logs/stream", panel.handleLogStream)
+	mux.HandleFunc("/api/kubeconfig", panel.handleKubeconfigDownload)
 	mux.HandleFunc("/api/cleanup", panel.handleCleanup)
 	mux.HandleFunc("/api/shutdown", panel.handleShutdown)
 
@@ -232,13 +280,13 @@ func (p *localControlPanel) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cluster, pod, container, err := p.logRequest(r)
+	cluster, pod, namespace, container, err := p.logRequest(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	args := []string{"logs", pod, "-n", "cattle-system", "--tail=200"}
+	args := []string{"logs", pod, "-n", namespace, "--tail=200"}
 	if container != "" {
 		args = append(args, "-c", container)
 	} else {
@@ -270,13 +318,13 @@ func (p *localControlPanel) handleLogStream(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	cluster, pod, container, err := p.logRequest(r)
+	cluster, pod, namespace, container, err := p.logRequest(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	args := []string{"logs", "-f", pod, "-n", "cattle-system", "--tail=20"}
+	args := []string{"logs", "-f", pod, "-n", namespace, "--tail=20"}
 	if container != "" {
 		args = append(args, "-c", container)
 	} else {
@@ -325,6 +373,39 @@ func (p *localControlPanel) handleLogStream(w http.ResponseWriter, r *http.Reque
 		sendLine("error", string(stderrBytes))
 	}
 	sendLine("end", "stream closed")
+}
+
+func (p *localControlPanel) handleKubeconfigDownload(w http.ResponseWriter, r *http.Request) {
+	if !p.authorizedLocalBrowserRead(r) {
+		http.Error(w, "invalid control panel token", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	clusterID := strings.TrimSpace(r.URL.Query().Get("cluster"))
+	if clusterID == "" {
+		http.Error(w, "cluster is required", http.StatusBadRequest)
+		return
+	}
+
+	cluster, err := p.clusterByID(clusterID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	content, filename, err := p.kubeconfigContentForDownload(cluster)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-yaml; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	_, _ = w.Write(content)
 }
 
 func (p *localControlPanel) handleCleanup(w http.ResponseWriter, r *http.Request) {
@@ -406,12 +487,17 @@ func (p *localControlPanel) snapshotCleanupState() cleanupState {
 func (p *localControlPanel) discoverClusters() []clusterView {
 	outputs, _ := readTerraformFlatOutputs(p.repoRoot)
 	versions := readRequestedRancherVersionsForPanel(p.totalHAs)
+	downstreamRecords, _ := readDownstreamOutputRecords()
+	recordsByHA := downstreamRecordsByHA(downstreamRecords)
 
 	clusters := make([]clusterView, 0, p.totalHAs)
 	for i := 1; i <= p.totalHAs; i++ {
 		cluster := clusterView{
-			ID:   i,
-			Name: fmt.Sprintf("HA %d", i),
+			ID:           localClusterID(i),
+			Type:         "local",
+			HAIndex:      i,
+			Name:         fmt.Sprintf("HA %d Local", i),
+			DownloadName: fmt.Sprintf("local-ha-%d.yaml", i),
 		}
 		if len(versions) >= i {
 			cluster.Version = versions[i-1]
@@ -429,13 +515,76 @@ func (p *localControlPanel) discoverClusters() []clusterView {
 		}
 
 		cluster.Available = true
-		pods, err := fetchRelevantPods(cluster.KubeconfigPath)
+		pods, err := fetchLocalRancherPods(cluster.KubeconfigPath)
 		if err != nil {
 			cluster.Error = err.Error()
+			clusters = append(clusters, cluster)
+			clusters = append(clusters, p.discoverDownstreamClusters(cluster, recordsByHA[i])...)
+			continue
+		}
+
+		cluster.Reachable = true
+		cluster.Pods = pods
+		clusters = append(clusters, cluster)
+		clusters = append(clusters, p.discoverDownstreamClusters(cluster, recordsByHA[i])...)
+	}
+
+	return clusters
+}
+
+func (p *localControlPanel) discoverDownstreamClusters(local clusterView, records []downstreamOutputRecord) []clusterView {
+	if !local.Available {
+		return nil
+	}
+
+	provisioningClusters, err := discoverProvisioningDownstreamClusters(local.KubeconfigPath)
+	if err != nil {
+		return downstreamClustersFromRecords(local, records, err)
+	}
+
+	recordByName := downstreamRecordsByClusterKey(records)
+	clusters := make([]clusterView, 0, len(provisioningClusters))
+	for _, item := range provisioningClusters {
+		key := provisioningClusterRecordKey(item.Namespace, item.Name)
+		record := recordByName[key]
+		cluster := clusterView{
+			ID:                  downstreamClusterID(local.HAIndex, item.Namespace, item.Name),
+			Type:                "downstream",
+			HAIndex:             local.HAIndex,
+			Name:                item.Name,
+			Version:             record.K3SVersion,
+			RancherURL:          local.RancherURL,
+			Namespace:           item.Namespace,
+			ManagementClusterID: item.ManagementClusterID,
+			DownloadName:        safeKubeconfigDownloadName(item.Name),
+			Available:           true,
+		}
+		if record.KubeconfigPath != "" {
+			cluster.KubeconfigPath = record.KubeconfigPath
+		}
+		if cluster.ManagementClusterID == "" {
+			cluster.Provisioning = true
+			cluster.ProvisioningMessage = "Waiting for Rancher to assign a downstream cluster id"
 			clusters = append(clusters, cluster)
 			continue
 		}
 
+		kubeconfigPath, err := p.ensureDownstreamKubeconfig(local.HAIndex, local.RancherURL, cluster.ID, item.ManagementClusterID, record.KubeconfigPath)
+		if err != nil {
+			cluster.Provisioning = true
+			cluster.ProvisioningMessage = "Waiting for downstream kubeconfig"
+			clusters = append(clusters, cluster)
+			continue
+		}
+		cluster.KubeconfigPath = kubeconfigPath
+
+		pods, err := fetchAllPods(kubeconfigPath)
+		if err != nil {
+			cluster.Provisioning = true
+			cluster.ProvisioningMessage = "Waiting for downstream Kubernetes API"
+			clusters = append(clusters, cluster)
+			continue
+		}
 		cluster.Reachable = true
 		cluster.Pods = pods
 		clusters = append(clusters, cluster)
@@ -444,8 +593,205 @@ func (p *localControlPanel) discoverClusters() []clusterView {
 	return clusters
 }
 
+func downstreamClustersFromRecords(local clusterView, records []downstreamOutputRecord, discoverErr error) []clusterView {
+	clusters := make([]clusterView, 0, len(records))
+	for _, record := range records {
+		cluster := clusterView{
+			ID:                  downstreamClusterID(local.HAIndex, record.Namespace, record.ClusterName),
+			Type:                "downstream",
+			HAIndex:             local.HAIndex,
+			Name:                record.ClusterName,
+			Version:             record.K3SVersion,
+			RancherURL:          local.RancherURL,
+			Namespace:           record.Namespace,
+			ManagementClusterID: record.ManagementClusterID,
+			KubeconfigPath:      record.KubeconfigPath,
+			DownloadName:        safeKubeconfigDownloadName(record.ClusterName),
+			Available:           record.KubeconfigPath != "" || record.ManagementClusterID != "",
+			Provisioning:        true,
+			ProvisioningMessage: fmt.Sprintf("Waiting for downstream discovery (%v)", discoverErr),
+		}
+		clusters = append(clusters, cluster)
+	}
+	return clusters
+}
+
+func discoverProvisioningDownstreamClusters(kubeconfigPath string) ([]discoveredDownstreamCluster, error) {
+	output, err := runKubectl(kubeconfigPath, "get", "clusters.provisioning.cattle.io", "-A", "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+
+	var list provisioningClusterList
+	if err := json.Unmarshal([]byte(output), &list); err != nil {
+		return nil, fmt.Errorf("failed to parse provisioning clusters: %w", err)
+	}
+
+	clusters := make([]discoveredDownstreamCluster, 0, len(list.Items))
+	for _, item := range list.Items {
+		name := strings.TrimSpace(item.Metadata.Name)
+		namespace := strings.TrimSpace(item.Metadata.Namespace)
+		if name == "" || namespace == "" {
+			continue
+		}
+		if name == "local" || namespace == "local" {
+			continue
+		}
+		clusters = append(clusters, discoveredDownstreamCluster{
+			Name:                name,
+			Namespace:           namespace,
+			ManagementClusterID: strings.TrimSpace(item.Status.ClusterName),
+		})
+	}
+
+	managementClusters, err := discoverManagementDownstreamClusters(kubeconfigPath)
+	if err == nil {
+		seenManagementIDs := map[string]bool{}
+		for _, cluster := range clusters {
+			if cluster.ManagementClusterID != "" {
+				seenManagementIDs[cluster.ManagementClusterID] = true
+			}
+		}
+		for _, cluster := range managementClusters {
+			if seenManagementIDs[cluster.ManagementClusterID] {
+				continue
+			}
+			clusters = append(clusters, cluster)
+		}
+	}
+
+	sort.Slice(clusters, func(i, j int) bool {
+		left := provisioningClusterRecordKey(clusters[i].Namespace, clusters[i].Name)
+		right := provisioningClusterRecordKey(clusters[j].Namespace, clusters[j].Name)
+		return left < right
+	})
+	return clusters, nil
+}
+
+func discoverManagementDownstreamClusters(kubeconfigPath string) ([]discoveredDownstreamCluster, error) {
+	output, err := runKubectl(kubeconfigPath, "get", "clusters.management.cattle.io", "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+
+	var list managementClusterList
+	if err := json.Unmarshal([]byte(output), &list); err != nil {
+		return nil, fmt.Errorf("failed to parse management clusters: %w", err)
+	}
+
+	clusters := make([]discoveredDownstreamCluster, 0, len(list.Items))
+	for _, item := range list.Items {
+		clusterID := strings.TrimSpace(item.Metadata.Name)
+		if clusterID == "" || clusterID == "local" {
+			continue
+		}
+		name := strings.TrimSpace(item.Spec.DisplayName)
+		if name == "" {
+			name = clusterID
+		}
+		clusters = append(clusters, discoveredDownstreamCluster{
+			Name:                name,
+			ManagementClusterID: clusterID,
+		})
+	}
+	return clusters, nil
+}
+
+func downstreamRecordsByHA(records []downstreamOutputRecord) map[int][]downstreamOutputRecord {
+	byHA := map[int][]downstreamOutputRecord{}
+	for _, record := range records {
+		byHA[record.HAIndex] = append(byHA[record.HAIndex], record)
+	}
+	return byHA
+}
+
+func downstreamRecordsByClusterKey(records []downstreamOutputRecord) map[string]downstreamOutputRecord {
+	byName := map[string]downstreamOutputRecord{}
+	for _, record := range records {
+		key := provisioningClusterRecordKey(record.Namespace, record.ClusterName)
+		byName[key] = record
+	}
+	return byName
+}
+
+func provisioningClusterRecordKey(namespace, name string) string {
+	return strings.TrimSpace(namespace) + "/" + strings.TrimSpace(name)
+}
+
+func localClusterID(instanceNum int) string {
+	return fmt.Sprintf("ha-%d-local", instanceNum)
+}
+
+func downstreamClusterID(instanceNum int, namespace, name string) string {
+	namespacePart := sanitizeIDPart(namespace)
+	namePart := sanitizeIDPart(name)
+	if namespacePart == "" {
+		return fmt.Sprintf("ha-%d-downstream-%s", instanceNum, namePart)
+	}
+	return fmt.Sprintf("ha-%d-downstream-%s-%s", instanceNum, namespacePart, namePart)
+}
+
+func sanitizeIDPart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func safeKubeconfigDownloadName(clusterName string) string {
+	name := sanitizeIDPart(clusterName)
+	if name == "" {
+		name = "downstream"
+	}
+	return name + ".yaml"
+}
+
+func fetchLocalRancherPods(kubeconfigPath string) ([]podView, error) {
+	pods, err := fetchPods(kubeconfigPath, "cattle-system")
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]podView, 0, len(pods))
+	for _, pod := range pods {
+		nameLower := strings.ToLower(pod.Name)
+		if !strings.Contains(nameLower, "rancher") && !strings.Contains(nameLower, "webhook") {
+			continue
+		}
+		filtered = append(filtered, pod)
+	}
+	return filtered, nil
+}
+
+func fetchAllPods(kubeconfigPath string) ([]podView, error) {
+	return fetchPods(kubeconfigPath, "")
+}
+
 func fetchRelevantPods(kubeconfigPath string) ([]podView, error) {
-	output, err := runKubectl(kubeconfigPath, "get", "pods", "-n", "cattle-system", "-o", "json")
+	return fetchLocalRancherPods(kubeconfigPath)
+}
+
+func fetchPods(kubeconfigPath, namespace string) ([]podView, error) {
+	args := []string{"get", "pods"}
+	if namespace == "" {
+		args = append(args, "-A")
+	} else {
+		args = append(args, "-n", namespace)
+	}
+	args = append(args, "-o", "json")
+
+	output, err := runKubectl(kubeconfigPath, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -459,11 +805,6 @@ func fetchRelevantPods(kubeconfigPath string) ([]podView, error) {
 
 	pods := make([]podView, 0)
 	for _, item := range list.Items {
-		nameLower := strings.ToLower(item.Metadata.Name)
-		if !strings.Contains(nameLower, "rancher") && !strings.Contains(nameLower, "webhook") {
-			continue
-		}
-
 		totalContainers := len(item.Spec.Containers)
 		readyContainers := 0
 		restarts := 0
@@ -491,6 +832,7 @@ func fetchRelevantPods(kubeconfigPath string) ([]podView, error) {
 
 		leaderLabel := leaderLabels[item.Metadata.Name]
 		pods = append(pods, podView{
+			Namespace:   item.Metadata.Namespace,
 			Name:        item.Metadata.Name,
 			Ready:       fmt.Sprintf("%d/%d", readyContainers, totalContainers),
 			Status:      status,
@@ -688,27 +1030,133 @@ func (p *localControlPanel) finishCleanup(err error) {
 	p.cleanupOutput = append(p.cleanupOutput, "[control-panel] Cleanup completed successfully")
 }
 
-func (p *localControlPanel) logRequest(r *http.Request) (clusterView, string, string, error) {
+func (p *localControlPanel) logRequest(r *http.Request) (clusterView, string, string, string, error) {
 	clusterID := strings.TrimSpace(r.URL.Query().Get("cluster"))
 	pod := strings.TrimSpace(r.URL.Query().Get("pod"))
+	namespace := strings.TrimSpace(r.URL.Query().Get("namespace"))
 	container := strings.TrimSpace(r.URL.Query().Get("container"))
 	if clusterID == "" || pod == "" {
-		return clusterView{}, "", "", fmt.Errorf("cluster and pod are required")
+		return clusterView{}, "", "", "", fmt.Errorf("cluster and pod are required")
+	}
+	if namespace == "" {
+		namespace = "cattle-system"
 	}
 
 	for _, cluster := range p.discoverClusters() {
-		if fmt.Sprintf("%d", cluster.ID) == clusterID {
+		if cluster.ID == clusterID {
 			if !cluster.Available {
-				return clusterView{}, "", "", fmt.Errorf("cluster is not available")
+				return clusterView{}, "", "", "", fmt.Errorf("cluster is not available")
 			}
 			if !cluster.Reachable {
-				return clusterView{}, "", "", fmt.Errorf("cluster is not reachable")
+				return clusterView{}, "", "", "", fmt.Errorf("cluster is not reachable")
 			}
-			return cluster, pod, container, nil
+			return cluster, pod, namespace, container, nil
 		}
 	}
 
-	return clusterView{}, "", "", fmt.Errorf("cluster %s not found", clusterID)
+	return clusterView{}, "", "", "", fmt.Errorf("cluster %s not found", clusterID)
+}
+
+func (p *localControlPanel) clusterByID(clusterID string) (clusterView, error) {
+	for _, cluster := range p.discoverClusters() {
+		if cluster.ID == clusterID {
+			return cluster, nil
+		}
+	}
+	return clusterView{}, fmt.Errorf("cluster %s not found", clusterID)
+}
+
+func (p *localControlPanel) kubeconfigContentForDownload(cluster clusterView) ([]byte, string, error) {
+	filename := strings.TrimSpace(cluster.DownloadName)
+	if filename == "" {
+		filename = "kubeconfig.yaml"
+	}
+
+	switch cluster.Type {
+	case "local":
+		if cluster.KubeconfigPath == "" {
+			return nil, "", fmt.Errorf("local kubeconfig path is unavailable")
+		}
+		data, err := os.ReadFile(cluster.KubeconfigPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to read local kubeconfig: %w", err)
+		}
+		return data, filename, nil
+	case "downstream":
+		if cluster.ManagementClusterID == "" {
+			return nil, "", fmt.Errorf("downstream cluster has no management cluster id yet")
+		}
+		token, err := p.rancherToken(cluster.HAIndex, cluster.RancherURL)
+		if err != nil {
+			return nil, "", err
+		}
+		kubeconfig, err := generateRancherKubeconfig(cluster.RancherURL, token, cluster.ManagementClusterID)
+		if err != nil {
+			return nil, "", err
+		}
+		return []byte(kubeconfig), filename, nil
+	default:
+		return nil, "", fmt.Errorf("unsupported cluster type %q", cluster.Type)
+	}
+}
+
+func (p *localControlPanel) ensureDownstreamKubeconfig(haIndex int, rancherURL, clusterKey, managementClusterID, existingPath string) (string, error) {
+	if existingPath != "" {
+		if _, err := os.Stat(existingPath); err == nil {
+			return existingPath, nil
+		}
+	}
+
+	p.mu.Lock()
+	if path := p.downstreamKubeconfigCache[clusterKey]; path != "" {
+		if _, err := os.Stat(path); err == nil {
+			p.mu.Unlock()
+			return path, nil
+		}
+	}
+	p.mu.Unlock()
+
+	token, err := p.rancherToken(haIndex, rancherURL)
+	if err != nil {
+		return "", err
+	}
+	kubeconfig, err := generateRancherKubeconfig(rancherURL, token, managementClusterID)
+	if err != nil {
+		return "", err
+	}
+
+	cacheDir := filepath.Join(automationOutputDir(), "control-panel")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(cacheDir, clusterKey+".yaml")
+	if err := os.WriteFile(path, []byte(kubeconfig), 0o600); err != nil {
+		return "", err
+	}
+
+	p.mu.Lock()
+	p.downstreamKubeconfigCache[clusterKey] = path
+	p.mu.Unlock()
+	return path, nil
+}
+
+func (p *localControlPanel) rancherToken(haIndex int, rancherURL string) (string, error) {
+	p.mu.Lock()
+	if token := p.rancherTokens[haIndex]; token != "" {
+		p.mu.Unlock()
+		return token, nil
+	}
+	p.mu.Unlock()
+
+	token, err := createRancherAdminToken(rancherURL, viper.GetString("rancher.bootstrap_password"))
+	if err != nil {
+		return "", err
+	}
+
+	p.mu.Lock()
+	p.rancherTokens[haIndex] = token
+	p.mu.Unlock()
+	return token, nil
 }
 
 func (p *localControlPanel) authorized(r *http.Request) bool {
@@ -721,6 +1169,10 @@ func (p *localControlPanel) authorized(r *http.Request) bool {
 
 func (p *localControlPanel) authorizedReadOnly(r *http.Request) bool {
 	return p.authorized(r) || requestFromLoopback(r)
+}
+
+func (p *localControlPanel) authorizedLocalBrowserRead(r *http.Request) bool {
+	return p.authorized(r) || (requestFromLoopback(r) && sameOriginBrowserRequest(r))
 }
 
 func (p *localControlPanel) authorizedLocalAction(r *http.Request) bool {
@@ -809,6 +1261,8 @@ const controlPanelHTML = `<!DOCTYPE html>
       --border: rgba(88, 71, 49, 0.16);
       --accent: #175f49;
       --accent-strong: #0f4636;
+      --download: #1f9d72;
+      --download-strong: #137955;
       --danger: #9a3424;
       --warning: #a06b00;
       --shadow: 0 28px 80px rgba(38, 29, 17, 0.16);
@@ -823,6 +1277,8 @@ const controlPanelHTML = `<!DOCTYPE html>
         --border: rgba(213, 201, 185, 0.14);
         --accent: #56bb95;
         --accent-strong: #3ca37d;
+        --download: #4ed69f;
+        --download-strong: #2fb980;
         --danger: #ff8e7d;
         --warning: #e4b44d;
         --shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
@@ -884,9 +1340,15 @@ const controlPanelHTML = `<!DOCTYPE html>
       font: inherit;
       font-weight: 700;
       cursor: pointer;
-      transition: transform 120ms ease, background 120ms ease, opacity 120ms ease;
+      transition: transform 120ms ease, background 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
+    }
+    button:disabled {
+      cursor: progress;
+      opacity: 0.78;
+      transform: none;
     }
     button:hover { transform: translateY(-1px); }
+    button:disabled:hover { transform: none; }
     button:active { transform: translateY(0); }
     .secondary { background: rgba(127, 111, 92, 0.14); color: var(--text); }
     .primary { background: var(--accent); color: #fff; }
@@ -916,19 +1378,47 @@ const controlPanelHTML = `<!DOCTYPE html>
     .cluster-card {
       border: 1px solid var(--border);
       border-radius: 16px;
-      padding: 16px;
+      padding: 18px 20px 20px;
       background: rgba(0, 0, 0, 0.02);
+    }
+    .cluster-card.downstream-card {
+      margin-left: 28px;
+      border-left: 5px solid var(--download);
+      background: linear-gradient(90deg, rgba(31, 157, 114, 0.1), rgba(0, 0, 0, 0.02) 34%);
     }
     .cluster-top {
       display: flex;
       justify-content: space-between;
-      gap: 12px;
-      align-items: center;
-      margin-bottom: 10px;
+      gap: 16px;
+      align-items: flex-start;
+      margin-bottom: 16px;
     }
     .cluster-name {
       font-weight: 800;
       font-size: 1rem;
+      padding-top: 8px;
+      min-width: 0;
+    }
+    .cluster-title-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .cluster-context {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 0.86rem;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .cluster-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+      min-width: 280px;
     }
     .pill {
       border-radius: 999px;
@@ -939,6 +1429,26 @@ const controlPanelHTML = `<!DOCTYPE html>
     .ok { background: rgba(29, 140, 106, 0.14); color: var(--accent); }
     .warn { background: rgba(160, 107, 0, 0.14); color: var(--warning); }
     .bad { background: rgba(154, 52, 36, 0.14); color: var(--danger); }
+    .spinner {
+      width: 13px;
+      height: 13px;
+      display: inline-block;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      animation: spin 850ms linear infinite;
+      vertical-align: -2px;
+      margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .provisioning-note {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      color: var(--muted);
+      background: rgba(160, 107, 0, 0.08);
+      font-weight: 700;
+    }
     .meta {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -977,6 +1487,58 @@ const controlPanelHTML = `<!DOCTYPE html>
       background: rgba(127, 111, 92, 0.14);
       color: var(--text);
       font-size: 0.8rem;
+    }
+    .download-button {
+      min-height: 44px;
+      padding: 12px 18px;
+      border-radius: 999px;
+      background: var(--download);
+      color: #fff;
+      font-size: 0.92rem;
+      box-shadow: 0 12px 28px rgba(31, 157, 114, 0.28);
+      white-space: nowrap;
+    }
+    .download-button:hover {
+      background: var(--download-strong);
+      box-shadow: 0 14px 34px rgba(31, 157, 114, 0.36);
+    }
+    .download-button.loading {
+      background: var(--download-strong);
+      box-shadow: 0 0 0 4px rgba(31, 157, 114, 0.14), 0 14px 34px rgba(31, 157, 114, 0.34);
+    }
+    .toggle-button {
+      min-height: 36px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(127, 111, 92, 0.16);
+      color: var(--text);
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+    .toggle-button:hover {
+      background: rgba(127, 111, 92, 0.24);
+    }
+    .cluster-body {
+      display: grid;
+      gap: 14px;
+    }
+    .pods-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 2px;
+    }
+    .pods-title {
+      font-weight: 800;
+    }
+    .pods-title span {
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .pods-table-wrap {
+      overflow-x: auto;
     }
     .pod-name {
       display: flex;
@@ -1063,6 +1625,10 @@ const controlPanelHTML = `<!DOCTYPE html>
       .layout { grid-template-columns: 1fr; }
       .hero { flex-direction: column; }
       .actions { justify-content: flex-start; }
+      .cluster-top { flex-direction: column; }
+      .cluster-name { padding-top: 0; }
+      .cluster-actions { justify-content: flex-start; min-width: 0; }
+      .cluster-card.downstream-card { margin-left: 0; }
     }
   </style>
 </head>
@@ -1130,6 +1696,11 @@ const controlPanelHTML = `<!DOCTYPE html>
     let stream = null;
     let previousLeaders = new Map();
     let pendingLeaderHighlights = new Map();
+    let collapsedClusters = new Map();
+    let collapsedPods = new Map();
+    let initializedCollapseState = new Set();
+    let lastState = null;
+    let activeDownloadClusterId = '';
     let lastLeaderChangeMessage = '';
 
     function escapeHtml(value) {
@@ -1155,19 +1726,26 @@ const controlPanelHTML = `<!DOCTYPE html>
       }
 
       clustersEl.innerHTML = clusterItems.map(cluster => {
-        const statusClass = cluster.reachable ? 'ok' : (cluster.available ? 'warn' : 'bad');
-        const statusText = cluster.reachable ? 'Reachable' : (cluster.available ? 'Unavailable' : 'Missing');
+        const isDownstream = cluster.type === 'downstream';
+        initializeCollapseState(cluster);
+        const statusClass = cluster.reachable ? 'ok' : (cluster.provisioning ? 'warn' : (cluster.available ? 'warn' : 'bad'));
+        const statusText = cluster.reachable ? 'Reachable' : (cluster.provisioning ? 'Provisioning' : (cluster.available ? 'Unavailable' : 'Missing'));
         const pods = Array.isArray(cluster.pods) ? cluster.pods : [];
         const currentLeader = pods.find(pod => pod.leader && pod.leaderLabel === 'Leader') || pods.find(pod => pod.leader);
         const changedLeader = pendingLeaderHighlights.get(cluster.id);
+        const quotedClusterId = JSON.stringify(cluster.id);
+        const clusterCollapsed = collapsedClusters.get(cluster.id) === true;
+        const podsCollapsed = collapsedPods.get(cluster.id) === true;
         const podRows = pods.length ? pods.map(pod => {
           const quotedPodName = JSON.stringify(pod.name);
+          const quotedNamespace = JSON.stringify(pod.namespace || 'cattle-system');
           const leaderBadge = pod.leader && pod.leaderLabel
             ? '<span class="badge">' + escapeHtml(pod.leaderLabel) + '</span>'
             : '';
           const rowClass = changedLeader && changedLeader === pod.name ? ' class="leader-row leader-changed"' : (pod.leader ? ' class="leader-row"' : '');
           return (
           '<tr' + rowClass + '>' +
+            '<td>' + escapeHtml(pod.namespace || '') + '</td>' +
             '<td><div class="pod-name"><span>' + escapeHtml(pod.name) + '</span>' + leaderBadge + '</div></td>' +
             '<td>' + escapeHtml(pod.ready) + '</td>' +
             '<td>' + escapeHtml(pod.status) + '</td>' +
@@ -1176,47 +1754,158 @@ const controlPanelHTML = `<!DOCTYPE html>
             '<td>' + escapeHtml(pod.node || '') + '</td>' +
             '<td>' + escapeHtml(pod.containers) + '</td>' +
             '<td><div class="pod-actions">' +
-              "<button class=\"tiny\" onclick='loadLogs(" + cluster.id + ", " + quotedPodName + ")'>Tail</button>" +
-              "<button class=\"tiny\" onclick='streamLogs(" + cluster.id + ", " + quotedPodName + ")'>Live</button>" +
+              "<button class=\"tiny\" onclick='loadLogs(" + quotedClusterId + ", " + quotedNamespace + ", " + quotedPodName + ")'>Tail</button>" +
+              "<button class=\"tiny\" onclick='streamLogs(" + quotedClusterId + ", " + quotedNamespace + ", " + quotedPodName + ")'>Live</button>" +
             '</div></td>' +
           '</tr>'
           );
-        }).join('') : '<tr><td colspan="8" class="muted">' + (cluster.error ? escapeHtml(cluster.error) : 'No Rancher/webhook pods found in cattle-system.') + '</td></tr>';
+        }).join('') : '<tr><td colspan="9" class="muted">' + (cluster.error ? escapeHtml(cluster.error) : emptyPodsText(cluster)) + '</td></tr>';
 
         const rancherLink = cluster.rancherUrl ? '<a href="' + cluster.rancherUrl + '" target="_blank" rel="noreferrer">' + cluster.rancherUrl + '</a>' : '<span class="muted">Unavailable</span>';
         const versionSuffix = cluster.version ? ' <span class="muted">(' + escapeHtml(cluster.version) + ')</span>' : '';
         const loadBalancer = cluster.loadBalancer ? escapeHtml(cluster.loadBalancer) : '<span class="muted">Unavailable</span>';
-        const kubeconfigPath = cluster.kubeconfigPath ? escapeHtml(cluster.kubeconfigPath) : '<span class="muted">Unavailable</span>';
+        const kubeconfigPath = cluster.kubeconfigPath ? escapeHtml(cluster.kubeconfigPath) : '<span class="muted">Generated on download</span>';
+        const namespace = cluster.namespace ? '<div><strong>Namespace</strong><span class="meta-value">' + escapeHtml(cluster.namespace) + '</span></div>' : '';
+        const managementClusterId = cluster.managementClusterId ? '<div><strong>Cluster ID</strong><span class="meta-value">' + escapeHtml(cluster.managementClusterId) + '</span></div>' : '';
+        const typeLabel = isDownstream ? '<span class="badge">Downstream</span>' : '<span class="badge">Local</span>';
+        const contextParts = isDownstream
+          ? ['Downstream from HA ' + cluster.haIndex]
+          : ['Management cluster for HA ' + cluster.haIndex];
+        if (isDownstream && cluster.namespace) contextParts.push('namespace ' + cluster.namespace);
+        if (isDownstream && cluster.managementClusterId) contextParts.push(cluster.managementClusterId);
+        const clusterContext = '<div class="cluster-context">' + escapeHtml(contextParts.join(' • ')) + '</div>';
+        const downloadButton = cluster.available
+          ? renderDownloadButton(cluster, quotedClusterId)
+          : '<span class="muted">Kubeconfig unavailable</span>';
+        const clusterToggleText = clusterCollapsed ? 'Show details' : 'Hide details';
+        const podsToggleText = podsCollapsed ? 'Show pods' : 'Hide pods';
         const leaderSummary = currentLeader
           ? '<div class="leader-summary"><strong>Active Leader</strong> ' + escapeHtml(currentLeader.name) + '</div>'
           : '<div class="leader-summary muted">Leader not detected yet.</div>';
+        const provisioningNote = cluster.provisioning
+          ? '<div class="provisioning-note"><span class="spinner"></span>' + escapeHtml(cluster.provisioningMessage || 'Provisioning downstream cluster') + '</div>'
+          : '';
+        const podsSection = cluster.provisioning ? provisioningNote : '<div class="pods-header">' +
+            '<div class="pods-title">Pods <span>' + pods.length + '</span></div>' +
+            "<button class=\"toggle-button\" onclick='togglePods(" + quotedClusterId + ")'>" + podsToggleText + '</button>' +
+          '</div>' +
+          (podsCollapsed ? '' :
+          '<div class="pods-table-wrap">' +
+            '<table>' +
+              '<thead><tr>' +
+                '<th>Namespace</th>' +
+                '<th>Pod</th>' +
+                '<th>Ready</th>' +
+                '<th>Status</th>' +
+                '<th>Restarts</th>' +
+                '<th>Age</th>' +
+                '<th>Node</th>' +
+                '<th>Containers</th>' +
+                '<th>Logs</th>' +
+              '</tr></thead>' +
+              '<tbody>' + podRows + '</tbody>' +
+            '</table>' +
+          '</div>');
+        const clusterBody = clusterCollapsed ? '' :
+          '<div class="cluster-body">' +
+            '<div class="meta">' +
+              '<div><strong>Rancher URL</strong><span class="meta-value">' + rancherLink + '</span></div>' +
+              '<div><strong>Load Balancer</strong><span class="meta-value">' + loadBalancer + '</span></div>' +
+              '<div><strong>Kubeconfig</strong><span class="meta-value">' + kubeconfigPath + '</span></div>' +
+              namespace +
+              managementClusterId +
+            '</div>' +
+            leaderSummary +
+            podsSection +
+          '</div>';
 
-        return '<div class="cluster-card">' +
+        return '<div class="cluster-card' + (isDownstream ? ' downstream-card' : '') + '">' +
           '<div class="cluster-top">' +
-            '<div class="cluster-name">' + escapeHtml(cluster.name) + versionSuffix + '</div>' +
-            '<span class="pill ' + statusClass + '">' + statusText + '</span>' +
+            '<div class="cluster-name">' +
+              '<div class="cluster-title-row">' + escapeHtml(cluster.name) + versionSuffix + ' ' + typeLabel + '</div>' +
+              clusterContext +
+            '</div>' +
+            '<div class="cluster-actions">' +
+              downloadButton +
+              "<button class=\"toggle-button\" onclick='toggleCluster(" + quotedClusterId + ")'>" + clusterToggleText + '</button>' +
+              '<span class="pill ' + statusClass + '">' + (cluster.provisioning ? '<span class="spinner"></span>' : '') + statusText + '</span>' +
+            '</div>' +
           '</div>' +
-          '<div class="meta">' +
-            '<div><strong>Rancher URL</strong><span class="meta-value">' + rancherLink + '</span></div>' +
-            '<div><strong>Load Balancer</strong><span class="meta-value">' + loadBalancer + '</span></div>' +
-            '<div><strong>Kubeconfig</strong><span class="meta-value">' + kubeconfigPath + '</span></div>' +
-          '</div>' +
-          leaderSummary +
-          '<table>' +
-            '<thead><tr>' +
-              '<th>Pod</th>' +
-              '<th>Ready</th>' +
-              '<th>Status</th>' +
-              '<th>Restarts</th>' +
-              '<th>Age</th>' +
-              '<th>Node</th>' +
-              '<th>Containers</th>' +
-              '<th>Logs</th>' +
-            '</tr></thead>' +
-            '<tbody>' + podRows + '</tbody>' +
-          '</table>' +
+          clusterBody +
         '</div>';
       }).join('');
+    }
+
+    function initializeCollapseState(cluster) {
+      if (initializedCollapseState.has(cluster.id)) {
+        return;
+      }
+      initializedCollapseState.add(cluster.id);
+      if (cluster.type === 'downstream') {
+        collapsedClusters.set(cluster.id, true);
+        collapsedPods.set(cluster.id, true);
+      }
+    }
+
+    function toggleCluster(clusterId) {
+      collapsedClusters.set(clusterId, collapsedClusters.get(clusterId) !== true);
+      if (lastState) renderClusters(lastState);
+    }
+
+    function togglePods(clusterId) {
+      collapsedPods.set(clusterId, collapsedPods.get(clusterId) !== true);
+      if (lastState) renderClusters(lastState);
+    }
+
+    function emptyPodsText(cluster) {
+      return cluster.type === 'downstream'
+        ? 'No pods found in the downstream cluster yet.'
+        : 'No Rancher/webhook pods found in cattle-system.';
+    }
+
+    function renderDownloadButton(cluster, quotedClusterId) {
+      const loading = activeDownloadClusterId === cluster.id;
+      const label = loading
+        ? '<span class="spinner"></span>Preparing kubeconfig'
+        : 'Download kubeconfig';
+      return "<button class=\"download-button" + (loading ? ' loading' : '') + "\" " +
+        (loading ? 'disabled ' : '') +
+        "onclick='downloadKubeconfig(" + quotedClusterId + ")'>" + label + '</button>';
+    }
+
+    async function downloadKubeconfig(clusterId) {
+      if (activeDownloadClusterId) {
+        return;
+      }
+      activeDownloadClusterId = clusterId;
+      if (lastState) renderClusters(lastState);
+      refreshStatusEl.textContent = 'Preparing kubeconfig download...';
+      try {
+        const response = await fetch('/api/kubeconfig?cluster=' + encodeURIComponent(clusterId), {
+          headers: { 'X-Control-Panel-Token': token }
+        });
+        if (!response.ok) {
+          refreshStatusEl.textContent = await response.text();
+          return;
+        }
+
+        const blob = await response.blob();
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const filenameMatch = disposition.match(/filename="?([^"]+)"?/);
+        const filename = filenameMatch ? filenameMatch[1] : 'kubeconfig.yaml';
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        refreshStatusEl.textContent = 'Downloaded ' + filename;
+      } finally {
+        activeDownloadClusterId = '';
+        if (lastState) renderClusters(lastState);
+      }
     }
 
     function updateLeaderTracking(state) {
@@ -1275,6 +1964,7 @@ const controlPanelHTML = `<!DOCTYPE html>
       refreshStatusEl.textContent = 'Refreshing…';
       try {
         const state = await fetchState();
+        lastState = state;
         updateLeaderTracking(state);
         renderClusters(state);
         renderCleanup(state.cleanup);
@@ -1294,10 +1984,10 @@ const controlPanelHTML = `<!DOCTYPE html>
       }
     }
 
-    async function loadLogs(clusterId, podName) {
+    async function loadLogs(clusterId, namespace, podName) {
       stopStream();
       logStatusEl.textContent = 'Loading logs for ' + podName + '…';
-      const response = await fetch('/api/logs?token=' + encodeURIComponent(token) + '&cluster=' + encodeURIComponent(clusterId) + '&pod=' + encodeURIComponent(podName));
+      const response = await fetch('/api/logs?token=' + encodeURIComponent(token) + '&cluster=' + encodeURIComponent(clusterId) + '&namespace=' + encodeURIComponent(namespace) + '&pod=' + encodeURIComponent(podName));
       const raw = await response.text();
       let payload = {};
       try {
@@ -1322,11 +2012,11 @@ const controlPanelHTML = `<!DOCTYPE html>
       }
     }
 
-    function streamLogs(clusterId, podName) {
+    function streamLogs(clusterId, namespace, podName) {
       stopStream();
       logBoxEl.textContent = '';
       logStatusEl.textContent = 'Streaming live logs for ' + podName + '…';
-      stream = new EventSource('/api/logs/stream?token=' + encodeURIComponent(token) + '&cluster=' + encodeURIComponent(clusterId) + '&pod=' + encodeURIComponent(podName));
+      stream = new EventSource('/api/logs/stream?token=' + encodeURIComponent(token) + '&cluster=' + encodeURIComponent(clusterId) + '&namespace=' + encodeURIComponent(namespace) + '&pod=' + encodeURIComponent(podName));
       stream.addEventListener('line', event => {
         logBoxEl.textContent += event.data + '\n';
         logBoxEl.scrollTop = logBoxEl.scrollHeight;
